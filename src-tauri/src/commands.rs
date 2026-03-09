@@ -321,6 +321,12 @@ pub struct InstallOptions {
   pub openclaw_package: Option<String>,
   #[serde(rename = "npmRegistry")]
   pub npm_registry: Option<String>,
+  #[serde(rename = "customBaseUrl")]
+  pub custom_base_url: Option<String>,
+  #[serde(rename = "customModelId")]
+  pub custom_model_id: Option<String>,
+  #[serde(rename = "customApiKey")]
+  pub custom_api_key: Option<String>,
 }
 
 fn validate_npm_package_name(value: &str) -> Result<String, String> {
@@ -417,6 +423,28 @@ fn command_output(path_env: &str, program: &str, args: &[&str]) -> Result<String
   ))
 }
 
+fn redact_sensitive_args(args: &[String]) -> String {
+  let mut out: Vec<String> = Vec::with_capacity(args.len());
+  let mut i = 0usize;
+  while i < args.len() {
+    let current = &args[i];
+    out.push(current.clone());
+    let is_sensitive_flag = matches!(
+      current.as_str(),
+      "--custom-api-key" | "--api-key" | "--token" | "--password"
+    );
+    if is_sensitive_flag {
+      if i + 1 < args.len() {
+        out.push("\"***\"".into());
+        i += 2;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  out.join(" ")
+}
+
 fn log_environment(window: &Window, cancel: &Arc<AtomicBool>, path_env: &str) {
   let _ = check_canceled(cancel);
   emit_log(window, "install-log", "== 环境诊断 ==");
@@ -500,7 +528,12 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
     let openclaw_package = validate_npm_package_name(options.openclaw_package.as_deref().unwrap_or("openclaw"))?;
     let path_env = crate::openclaw::create_base_path_env();
 
-    let total = 5u32;
+    let needs_onboard = options
+      .custom_api_key
+      .as_deref()
+      .map(|v| !v.trim().is_empty())
+      .unwrap_or(false);
+    let total = if needs_onboard { 6u32 } else { 5u32 };
     emit_progress(&window, "prepare", "准备环境…", 1, total);
     emit_log(&window, "install-log", format!("平台：{} / {}", std::env::consts::OS, std::env::consts::ARCH));
     emit_log(&window, "install-log", format!("openclaw 包名：{openclaw_package}"));
@@ -589,6 +622,64 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
 
     let version = info.version.unwrap_or_else(|| "unknown".into());
     emit_log(&window, "install-log", format!("openclaw --version => {version}"));
+
+    if needs_onboard {
+      emit_progress(&window, "onboard", "自动配置 openclaw…", 6, total);
+      check_canceled(&cancel)?;
+
+      let base_url = options
+        .custom_base_url
+        .as_deref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .unwrap_or("https://sub.yeelovo.com/v1");
+      let model_id = options
+        .custom_model_id
+        .as_deref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .unwrap_or("openai");
+      let api_key = options.custom_api_key.as_deref().unwrap_or("").trim().to_string();
+      if api_key.is_empty() {
+        return Err("缺少 CUSTOM_API_KEY（用于 openclaw onboard）。".into());
+      }
+
+      let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
+      let mut cmd = Command::new(&resolved.command);
+      cmd.env("PATH", &resolved.path_env);
+      cmd.args([
+        "onboard",
+        "--non-interactive",
+        "--auth-choice",
+        "custom-api-key",
+        "--custom-base-url",
+        base_url,
+        "--custom-model-id",
+        model_id,
+        "--custom-api-key",
+        &api_key,
+        "--secret-input-mode",
+        "plaintext",
+        "--custom-compatibility",
+        "openai",
+      ]);
+
+      let args_for_log: Vec<String> = std::iter::once(resolved.command.to_string_lossy().to_string())
+        .chain(cmd.get_args().map(|a| a.to_string_lossy().to_string()))
+        .collect();
+      emit_log(&window, "install-log", format!("[openclaw] {}", redact_sensitive_args(&args_for_log)));
+
+      let w = window.clone();
+      let cancel2 = cancel.clone();
+      let code = spawn_with_streaming_logs_cancelable(cmd, cancel2, move |line| {
+        emit_log(&w, "install-log", format!("[openclaw] {line}"));
+      })?;
+      if code != 0 {
+        return Err(format!("openclaw onboard 失败（退出码 {code}）"));
+      }
+    } else {
+      emit_log(&window, "install-log", "跳过自动配置：未提供 CUSTOM_API_KEY。");
+    }
     let _ = window.emit("install-progress", ProgressPayload {
       stage: "done".into(),
       title: "完成".into(),
