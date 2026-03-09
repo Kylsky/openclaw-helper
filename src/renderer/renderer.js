@@ -31,9 +31,70 @@ const updateBtn = el("updateBtn");
 const updateChannel = el("updateChannel");
 const uninstallBtn = el("uninstallBtn");
 
+const modalOverlay = el("modalOverlay");
+const modalTitle = el("modalTitle");
+const modalBody = el("modalBody");
+const modalCancelBtn = el("modalCancelBtn");
+const modalConfirmBtn = el("modalConfirmBtn");
+
 let taskRunning = false;
 let cachedGatewayUrl = null;
 let cachedGatewayState = "unknown";
+
+function confirmModal({ title, body, confirmText = "确定", cancelText = "取消" }) {
+  return new Promise((resolve) => {
+    if (!modalOverlay || !modalTitle || !modalBody || !modalCancelBtn || !modalConfirmBtn) {
+      // Fallback: if modal markup missing, behave as canceled.
+      resolve(false);
+      return;
+    }
+
+    modalTitle.textContent = String(title ?? "确认");
+    modalBody.textContent = String(body ?? "");
+    modalCancelBtn.textContent = String(cancelText ?? "取消");
+    modalConfirmBtn.textContent = String(confirmText ?? "确定");
+
+    modalOverlay.classList.remove("hidden");
+
+    const cleanup = () => {
+      modalOverlay.classList.add("hidden");
+      modalCancelBtn.removeEventListener("click", onCancel);
+      modalConfirmBtn.removeEventListener("click", onConfirm);
+      window.removeEventListener("keydown", onKeydown);
+      modalOverlay.removeEventListener("click", onOverlayClick);
+    };
+
+    const onCancel = () => {
+      cleanup();
+      resolve(false);
+    };
+
+    const onConfirm = () => {
+      cleanup();
+      resolve(true);
+    };
+
+    const onKeydown = (event) => {
+      if (event.key === "Escape") onCancel();
+      if (event.key === "Enter") onConfirm();
+    };
+
+    const onOverlayClick = (event) => {
+      if (event.target === modalOverlay) onCancel();
+    };
+
+    modalCancelBtn.addEventListener("click", onCancel);
+    modalConfirmBtn.addEventListener("click", onConfirm);
+    modalOverlay.addEventListener("click", onOverlayClick);
+    window.addEventListener("keydown", onKeydown);
+
+    try {
+      modalConfirmBtn.focus();
+    } catch {
+      // ignore
+    }
+  });
+}
 
 function applyGatewayActionAvailability() {
   const hasInstallBtn = Boolean(gatewayInstallBtn);
@@ -328,9 +389,12 @@ if (uninstallBtn) {
     showLogsCheckbox.checked = true;
     updateLogVisibility();
     appendLog("[ui] 点击卸载");
-    const confirmed = window.confirm(
-      "将执行 openclaw 卸载（service/state/workspace），并尝试自动移除 CLI（brew / npm / pnpm）。是否继续？"
-    );
+    const confirmed = await confirmModal({
+      title: "确认卸载",
+      body: "将执行 openclaw 卸载（service/state/workspace），并尝试自动移除 CLI（brew / npm / pnpm / nvm）。是否继续？",
+      confirmText: "继续卸载",
+      cancelText: "取消"
+    });
     if (!confirmed) {
       appendLog("[ui] 用户取消卸载");
       return;

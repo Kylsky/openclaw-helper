@@ -103,6 +103,17 @@
     </section>
   </div>
 
+  <div id="modalOverlay" class="modalOverlay hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal">
+      <div id="modalTitle" class="modalTitle">确认</div>
+      <div id="modalBody" class="modalBody"></div>
+      <div class="modalActions">
+        <button id="modalCancelBtn" class="secondary" type="button">取消</button>
+        <button id="modalConfirmBtn" type="button">确定</button>
+      </div>
+    </div>
+  </div>
+
   <script src="./boot.js"></script>
   <script src="./installer.js"></script>
   <script src="./renderer.js"></script>
