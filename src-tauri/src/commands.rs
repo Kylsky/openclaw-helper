@@ -512,6 +512,27 @@ fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), Strin
   Ok(())
 }
 
+fn expand_user_path(raw: &str) -> PathBuf {
+  let trimmed = raw.trim();
+  if trimmed == "~" {
+    if let Ok(home) = std::env::var("HOME") {
+      if !home.trim().is_empty() {
+        return PathBuf::from(home);
+      }
+    }
+  }
+
+  if let Some(rest) = trimmed.strip_prefix("~/") {
+    if let Ok(home) = std::env::var("HOME") {
+      if !home.trim().is_empty() {
+        return PathBuf::from(home).join(rest);
+      }
+    }
+  }
+
+  PathBuf::from(trimmed)
+}
+
 fn set_openai_api_mode_openai_responses(
   window: &Window,
   cancel: &Arc<AtomicBool>,
@@ -526,14 +547,24 @@ fn set_openai_api_mode_openai_responses(
     .into_iter()
     .next()
     .ok_or("未能获取 openclaw config file 路径")?;
-  let config_path = PathBuf::from(config_file.trim());
+  let config_path = expand_user_path(config_file.trim());
   if config_path.as_os_str().is_empty() {
     return Err("openclaw config file 返回空路径".into());
   }
-  emit_log(window, "install-log", format!("[config] file: {}", config_path.to_string_lossy()));
+  emit_log(
+    window,
+    "install-log",
+    format!("[config] file: {}", config_path.to_string_lossy()),
+  );
 
   // 2) Read JSON.
-  let raw = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+  let raw = std::fs::read_to_string(&config_path).map_err(|e| {
+    format!(
+      "{} (path: {})",
+      e.to_string(),
+      config_path.to_string_lossy()
+    )
+  })?;
   let mut json: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
 
   // 3) Determine provider id from agents.defaults.model.
