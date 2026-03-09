@@ -9,7 +9,6 @@ const versionPill = el("versionPill");
 const gatewayStatusPill = el("gatewayStatusPill");
 const refreshBtn = el("refreshBtn");
 const openDashboardBtn = el("openDashboardBtn");
-const openWizardBtn = el("openWizardBtn");
 
 const installBtn = el("installBtn");
 const cancelBtn = el("cancelBtn");
@@ -41,7 +40,6 @@ const modalCancelBtn = el("modalCancelBtn");
 const modalConfirmBtn = el("modalConfirmBtn");
 
 let taskRunning = false;
-let cachedGatewayUrl = null;
 let cachedGatewayState = "unknown";
 
 function confirmModal({ title, body, confirmText = "确定", cancelText = "取消" }) {
@@ -101,12 +99,16 @@ function confirmModal({ title, body, confirmText = "确定", cancelText = "取�
 
 function applyGatewayActionAvailability() {
   const isNotInstalled = cachedGatewayState === "not_installed";
+  const isRunning = cachedGatewayState === "running";
 
   // We auto-handle service install when the user hits "Start" (so no dedicated
   // "Install service" button is needed).
   gatewayStartBtn.disabled = taskRunning;
   gatewayStopBtn.disabled = taskRunning || isNotInstalled;
   gatewayStatusBtn.disabled = taskRunning;
+
+  // "Open Dashboard" only works when the local gateway is running (tokenized URL).
+  openDashboardBtn.disabled = taskRunning || !isRunning;
 }
 
 function isMissingOpenclawError(error) {
@@ -153,9 +155,6 @@ function setTaskRunning(value) {
   cancelBtn.disabled = !value;
   stopBtn.disabled = !value;
 
-  openDashboardBtn.disabled = value;
-  openWizardBtn.disabled = value;
-
   applyGatewayActionAvailability();
   doctorBtn.disabled = value;
   updateBtn.disabled = value;
@@ -193,7 +192,6 @@ function setGatewayStatus(status) {
   gatewayStatusPill.textContent = `网关：${label}`;
 
   cachedGatewayState = state;
-  cachedGatewayUrl = status?.dashboardUrl || null;
   applyGatewayActionAvailability();
 }
 
@@ -202,7 +200,6 @@ async function refreshGatewayStatus() {
     const status = await installer.getGatewayStatus();
     setGatewayStatus(status);
   } catch (error) {
-    cachedGatewayUrl = null;
     gatewayStatusPill.textContent = "网关：检测失败";
     appendLog(`[错误] ${error?.message || String(error)}`);
     await rerouteIfOpenclawMissing(error);
@@ -224,7 +221,6 @@ async function checkAndRoute() {
     appendLog(`[错误] ${error?.message || String(error)}`);
   }
 
-  cachedGatewayUrl = null;
   cachedGatewayState = "unknown";
   showInstaller();
   setStage("等待开始…");
@@ -309,39 +305,8 @@ openDashboardBtn.addEventListener("click", async () => {
   if (taskRunning) return;
   setTaskRunning(true);
   try {
-    // Prefer the Dashboard URL from gateway status when available, since it's
-    // fast and avoids extra command parsing. Fall back to `openclaw dashboard`
-    // lookup when we don't have a cached URL yet.
-    if (!cachedGatewayUrl) {
-      try {
-        const status = await installer.getGatewayStatus();
-        setGatewayStatus(status);
-      } catch {
-        // ignore
-      }
-    }
-
-    if (cachedGatewayUrl) {
-      await installer.openExternal(cachedGatewayUrl);
-      return;
-    }
-
+    // Always use `openclaw dashboard --no-open` because it appends the token to the URL.
     await installer.openDashboard();
-  } catch (error) {
-    appendLog(`[错误] ${error?.message || String(error)}`);
-    showLogsCheckbox.checked = true;
-    updateLogVisibility();
-    await rerouteIfOpenclawMissing(error);
-  } finally {
-    setTaskRunning(false);
-  }
-});
-
-openWizardBtn.addEventListener("click", async () => {
-  if (taskRunning) return;
-  setTaskRunning(true);
-  try {
-    await installer.openWizard();
   } catch (error) {
     appendLog(`[错误] ${error?.message || String(error)}`);
     showLogsCheckbox.checked = true;

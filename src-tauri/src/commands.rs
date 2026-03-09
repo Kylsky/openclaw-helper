@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Window};
@@ -445,6 +446,137 @@ fn redact_sensitive_args(args: &[String]) -> String {
   out.join(" ")
 }
 
+fn parse_provider_id_from_config_value(value: &serde_json::Value) -> Option<String> {
+  let primary = match value {
+    serde_json::Value::String(s) => Some(s.as_str()),
+    serde_json::Value::Object(obj) => obj.get("primary").and_then(|v| v.as_str()),
+    _ => None,
+  }?;
+  let trimmed = primary.trim();
+  if trimmed.is_empty() {
+    return None;
+  }
+  let provider = trimmed.split('/').next()?.trim();
+  if provider.is_empty() {
+    return None;
+  }
+  Some(provider.to_string())
+}
+
+fn run_openclaw_collect(
+  resolved: &crate::openclaw::ResolvedOpenclaw,
+  args: &[&str],
+) -> Result<String, String> {
+  let mut cmd = Command::new(&resolved.command);
+  cmd.env("PATH", &resolved.path_env);
+  cmd.args(args);
+  let out = cmd.output().map_err(|e| e.to_string())?;
+  Ok(format!(
+    "{}\n{}",
+    String::from_utf8_lossy(&out.stdout),
+    String::from_utf8_lossy(&out.stderr)
+  ))
+}
+
+fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+  let pretty = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+  let dir = path.parent().ok_or("invalid config path")?;
+  std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+
+  let tmp_path = dir.join(format!(
+    ".openclaw-helper-{}.tmp",
+    SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .unwrap_or_default()
+      .as_millis()
+  ));
+
+  {
+    use std::io::Write;
+    let mut file = std::fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
+    file.write_all(pretty.as_bytes()).map_err(|e| e.to_string())?;
+    file.write_all(b"\n").map_err(|e| e.to_string())?;
+  }
+
+  // Try to preserve original permissions when possible.
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+      let mode = meta.permissions().mode();
+      let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(mode));
+    }
+  }
+
+  std::fs::rename(&tmp_path, path).map_err(|e| e.to_string())?;
+  Ok(())
+}
+
+fn set_openai_api_mode_openai_responses(
+  window: &Window,
+  cancel: &Arc<AtomicBool>,
+  resolved: &crate::openclaw::ResolvedOpenclaw,
+) -> Result<(), String> {
+  check_canceled(cancel)?;
+  emit_log(window, "install-log", "[config] 设置 api=openai-responses…");
+
+  // 1) Find the active config file path via CLI to avoid guessing.
+  let config_file_out = run_openclaw_collect(resolved, &["config", "file"])?;
+  let config_file = split_lines(&config_file_out)
+    .into_iter()
+    .next()
+    .ok_or("未能获取 openclaw config file 路径")?;
+  let config_path = PathBuf::from(config_file.trim());
+  if config_path.as_os_str().is_empty() {
+    return Err("openclaw config file 返回空路径".into());
+  }
+  emit_log(window, "install-log", format!("[config] file: {}", config_path.to_string_lossy()));
+
+  // 2) Read JSON.
+  let raw = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+  let mut json: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+
+  // 3) Determine provider id from agents.defaults.model.
+  let model_value = json
+    .pointer("/agents/defaults/model")
+    .ok_or("config 缺少 agents.defaults.model")?
+    .clone();
+  let provider_id = parse_provider_id_from_config_value(&model_value).ok_or("无法从 agents.defaults.model 推断 provider id")?;
+  emit_log(window, "install-log", format!("[config] provider: {provider_id}"));
+
+  // 4) Set models.providers.<providerId>.api = openai-responses.
+  let providers = json
+    .pointer_mut("/models/providers")
+    .and_then(|v| v.as_object_mut());
+  let providers = match providers {
+    Some(p) => p,
+    None => {
+      // Ensure objects exist.
+      if !json.get("models").is_some() {
+        json["models"] = serde_json::json!({});
+      }
+      if !json["models"].get("providers").is_some() {
+        json["models"]["providers"] = serde_json::json!({});
+      }
+      json["models"]["providers"].as_object_mut().ok_or("无法创建 models.providers")?
+    }
+  };
+
+  if !providers.contains_key(&provider_id) {
+    providers.insert(provider_id.clone(), serde_json::json!({}));
+  }
+
+  let provider_obj = providers
+    .get_mut(&provider_id)
+    .and_then(|v| v.as_object_mut())
+    .ok_or("models.providers.<provider> 不是对象")?;
+  provider_obj.insert("api".into(), serde_json::Value::String("openai-responses".into()));
+
+  atomic_write_json(&config_path, &json)?;
+  emit_log(window, "install-log", "[config] ok");
+  Ok(())
+}
+
 fn log_environment(window: &Window, cancel: &Arc<AtomicBool>, path_env: &str) {
   let _ = check_canceled(cancel);
   emit_log(window, "install-log", "== 环境诊断 ==");
@@ -533,7 +665,7 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
       .as_deref()
       .map(|v| !v.trim().is_empty())
       .unwrap_or(false);
-    let total = if needs_onboard { 6u32 } else { 5u32 };
+    let total = if needs_onboard { 8u32 } else { 5u32 };
     emit_progress(&window, "prepare", "准备环境…", 1, total);
     emit_log(&window, "install-log", format!("平台：{} / {}", std::env::consts::OS, std::env::consts::ARCH));
     emit_log(&window, "install-log", format!("openclaw 包名：{openclaw_package}"));
@@ -677,6 +809,23 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
       })?;
       if code != 0 {
         return Err(format!("openclaw onboard 失败（退出码 {code}）"));
+      }
+
+      emit_progress(&window, "config", "写入 openai-responses 配置…", 7, total);
+      set_openai_api_mode_openai_responses(&window, &cancel, &resolved)?;
+
+      emit_progress(&window, "gateway", "重启网关服务…", 8, total);
+      check_canceled(&cancel)?;
+      let mut restart = Command::new(&resolved.command);
+      restart.env("PATH", &resolved.path_env);
+      restart.args(["gateway", "restart"]);
+      let w2 = window.clone();
+      let cancel3 = cancel.clone();
+      let code2 = spawn_with_streaming_logs_cancelable(restart, cancel3, move |line| {
+        emit_log(&w2, "install-log", format!("[openclaw] {line}"));
+      })?;
+      if code2 != 0 {
+        return Err(format!("网关重启失败（退出码 {code2}）。你可以手动运行：openclaw gateway restart"));
       }
     } else {
       emit_log(&window, "install-log", "跳过自动配置：未提供 CUSTOM_API_KEY。");
