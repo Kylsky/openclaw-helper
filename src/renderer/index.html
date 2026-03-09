@@ -17,6 +17,18 @@
 
     <section id="installerCard" class="card hidden">
       <h2>一键安装</h2>
+      <div class="field">
+        <div class="label">自定义 Base URL</div>
+        <input id="customBaseUrl" type="text" value="https://sub.yeelovo.com/v1" />
+      </div>
+      <div class="field">
+        <div class="label">模型 ID</div>
+        <input id="customModelId" type="text" value="openai" />
+      </div>
+      <div class="field">
+        <div class="label">CUSTOM_API_KEY</div>
+        <input id="customApiKey" type="password" placeholder="粘贴你的 API Key（仅用于执行 openclaw onboard）" />
+      </div>
       <div class="actions">
         <button id="installBtn" type="button">开始安装</button>
         <button id="cancelBtn" class="secondary" type="button" disabled>取消</button>

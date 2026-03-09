@@ -18,6 +18,10 @@ const showLogsCheckbox = el("showLogs");
 const logCard = el("logCard");
 const logEl = el("log");
 
+const customBaseUrlInput = el("customBaseUrl");
+const customModelIdInput = el("customModelId");
+const customApiKeyInput = el("customApiKey");
+
 const stageText = el("stageText");
 const progressBar = el("progressBar");
 const progressText = el("progressText");
@@ -272,7 +276,14 @@ installBtn.addEventListener("click", async () => {
   setProgress(0);
 
   try {
-    await installer.startInstall({});
+    const customBaseUrl = customBaseUrlInput?.value ? String(customBaseUrlInput.value).trim() : "";
+    const customModelId = customModelIdInput?.value ? String(customModelIdInput.value).trim() : "";
+    const customApiKey = customApiKeyInput?.value ? String(customApiKeyInput.value).trim() : "";
+    await installer.startInstall({
+      customBaseUrl,
+      customModelId,
+      customApiKey
+    });
     setStage("完成");
     setProgress(1);
 
