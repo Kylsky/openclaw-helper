@@ -2,7 +2,11 @@ use crate::openclaw::{
   cleanup_mac_nvm_openclaw, get_openclaw_info, parse_gateway_status, resolve_openclaw,
   spawn_with_streaming_logs, GatewayStatus, OpenclawInfo,
 };
+use serde::Deserialize;
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Window};
@@ -20,9 +24,75 @@ struct LogPayload {
   ts: u64,
 }
 
+#[derive(Debug, Serialize, Clone)]
+struct ProgressPayload {
+  stage: String,
+  title: String,
+  index: u32,
+  total: u32,
+  percent: f32,
+}
+
 fn emit_log(window: &Window, event: &str, message: impl Into<String>) {
   let payload = LogPayload { message: message.into(), ts: now_ms() };
   let _ = window.emit(event, payload);
+}
+
+fn emit_progress(window: &Window, stage: &str, title: &str, index: u32, total: u32) {
+  let total_f = total.max(1) as f32;
+  let percent = ((index.saturating_sub(1)) as f32 / total_f).clamp(0.0, 1.0);
+  let payload = ProgressPayload {
+    stage: stage.into(),
+    title: title.into(),
+    index,
+    total,
+    percent,
+  };
+  let _ = window.emit("install-progress", payload);
+}
+
+fn check_canceled(flag: &Arc<AtomicBool>) -> Result<(), String> {
+  if flag.load(Ordering::SeqCst) {
+    return Err("用户取消".into());
+  }
+  Ok(())
+}
+
+#[derive(Default)]
+pub struct TaskState {
+  running: Mutex<bool>,
+  cancel_flag: Mutex<Option<Arc<AtomicBool>>>,
+}
+
+impl TaskState {
+  fn start(&self) -> Result<Arc<AtomicBool>, String> {
+    let mut running = self.running.lock().map_err(|_| "内部错误：锁失败")?;
+    if *running {
+      return Err("已有任务正在运行，请先取消或等待完成。".into());
+    }
+    *running = true;
+    let flag = Arc::new(AtomicBool::new(false));
+    let mut slot = self.cancel_flag.lock().map_err(|_| "内部错误：锁失败")?;
+    *slot = Some(flag.clone());
+    Ok(flag)
+  }
+
+  fn finish(&self) {
+    if let Ok(mut running) = self.running.lock() {
+      *running = false;
+    }
+    if let Ok(mut slot) = self.cancel_flag.lock() {
+      *slot = None;
+    }
+  }
+
+  fn cancel(&self) {
+    if let Ok(slot) = self.cancel_flag.lock() {
+      if let Some(flag) = slot.as_ref() {
+        flag.store(true, Ordering::SeqCst);
+      }
+    }
+  }
 }
 
 #[tauri::command]
@@ -135,6 +205,21 @@ pub async fn open_wizard(_app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn open_external(app: AppHandle, url: String) -> Result<(), String> {
+  let url = url.trim().to_string();
+  if !(url.starts_with("http://") || url.starts_with("https://")) {
+    return Err("只允许打开 http/https 链接".into());
+  }
+
+  #[allow(deprecated)]
+  {
+    use tauri_plugin_shell::ShellExt;
+    app.shell().open(url, None).map_err(|e| e.to_string())?;
+  }
+  Ok(())
+}
+
+#[tauri::command]
 pub async fn uninstall_openclaw(window: Window) -> Result<(), String> {
   let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
   let openclaw_cmd = resolved.command.clone();
@@ -209,14 +294,221 @@ pub async fn uninstall_openclaw(window: Window) -> Result<(), String> {
   Ok(())
 }
 
-#[tauri::command]
-pub async fn start_install(window: Window, options: serde_json::Value) -> Result<(), String> {
-  let _ = options;
-  emit_log(&window, "install-log", "Tauri 版本安装流程尚未迁移完成。");
-  Err("暂不支持：Tauri 版本尚未实现自动安装流程。".into())
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct InstallOptions {
+  #[serde(rename = "openclawPackage")]
+  pub openclaw_package: Option<String>,
+  #[serde(rename = "npmRegistry")]
+  pub npm_registry: Option<String>,
+}
+
+fn validate_npm_package_name(value: &str) -> Result<String, String> {
+  let name = value.trim();
+  if name.is_empty() {
+    return Err("openclaw 包名不能为空".into());
+  }
+  if name.len() > 214 {
+    return Err("openclaw 包名太长".into());
+  }
+  if name.chars().any(|c| c.is_whitespace()) {
+    return Err("openclaw 包名不能包含空格".into());
+  }
+  let ok = name
+    .chars()
+    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '@' | '/' | '.' | '_' | '-' ));
+  if !ok || name.contains("..") || name.contains("//") || name.contains('\\') || name.contains('\'') || name.contains('\"') || name.contains('`') {
+    return Err("openclaw 包名不合法".into());
+  }
+  Ok(name.to_string())
+}
+
+fn parse_node_major(output: &str) -> Option<u32> {
+  let line = split_lines(output).into_iter().next()?;
+  let trimmed = line.trim_start_matches('v');
+  let major = trimmed.split('.').next()?.parse::<u32>().ok()?;
+  Some(major)
+}
+
+fn split_lines(text: &str) -> Vec<String> {
+  text
+    .replace("\r\n", "\n")
+    .split('\n')
+    .map(|l| l.trim().to_string())
+    .filter(|l| !l.is_empty())
+    .collect()
+}
+
+fn find_brew(path_env: &str) -> Option<String> {
+  let candidates = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"];
+  for c in candidates {
+    if std::path::Path::new(c).exists() {
+      return Some(c.into());
+    }
+  }
+
+  let ok = Command::new("brew")
+    .env("PATH", path_env)
+    .arg("--version")
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .map(|s| s.success())
+    .unwrap_or(false);
+  if ok {
+    Some("brew".into())
+  } else {
+    None
+  }
+}
+
+fn run_logged(window: &Window, cancel: &Arc<AtomicBool>, label: &str, cmd: Command) -> Result<i32, String> {
+  check_canceled(cancel)?;
+  emit_log(window, "install-log", format!("{label} {}", format_command_for_log(&cmd)));
+  let w = window.clone();
+  let prefix = label.to_string();
+  let cancel2 = cancel.clone();
+  spawn_with_streaming_logs(cmd, move |line| {
+    if cancel2.load(Ordering::SeqCst) {
+      return;
+    }
+    emit_log(&w, "install-log", format!("{prefix} {line}"));
+  })
+}
+
+fn format_command_for_log(cmd: &Command) -> String {
+  let prog = cmd.get_program().to_string_lossy();
+  let mut parts = vec![prog.to_string()];
+  for arg in cmd.get_args() {
+    let s = arg.to_string_lossy().to_string();
+    if s.contains(' ') {
+      parts.push(format!("\"{s}\""));
+    } else {
+      parts.push(s);
+    }
+  }
+  parts.join(" ")
+}
+
+fn command_output(path_env: &str, program: &str, args: &[&str]) -> Result<String, String> {
+  let mut cmd = Command::new(program);
+  cmd.env("PATH", path_env);
+  cmd.args(args);
+  let out = cmd.output().map_err(|e| e.to_string())?;
+  Ok(format!(
+    "{}\n{}",
+    String::from_utf8_lossy(&out.stdout),
+    String::from_utf8_lossy(&out.stderr)
+  ))
 }
 
 #[tauri::command]
-pub async fn cancel_task() -> Result<(), String> {
+pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, options: InstallOptions) -> Result<(), String> {
+  const MIN_NODE_MAJOR: u32 = 22;
+  let cancel = state.start()?;
+  let result = (|| -> Result<(), String> {
+    let openclaw_package = validate_npm_package_name(options.openclaw_package.as_deref().unwrap_or("openclaw"))?;
+    let path_env = crate::openclaw::create_base_path_env();
+
+    let total = 5u32;
+    emit_progress(&window, "prepare", "准备环境…", 1, total);
+    emit_log(&window, "install-log", format!("平台：{} / {}", std::env::consts::OS, std::env::consts::ARCH));
+    emit_log(&window, "install-log", format!("openclaw 包名：{openclaw_package}"));
+    if let Some(reg) = options.npm_registry.as_ref() {
+      emit_log(&window, "install-log", format!("npm registry: {reg}"));
+    }
+
+    check_canceled(&cancel)?;
+
+    emit_progress(&window, "git", "检测 Git…", 2, total);
+    let git_ok = command_output(&path_env, "git", &["--version"]).is_ok();
+    if !git_ok {
+      #[cfg(target_os = "macos")]
+      {
+        if let Some(brew) = find_brew(&path_env) {
+          let mut cmd = Command::new(brew);
+          cmd.env("PATH", &path_env);
+          cmd.args(["install", "git"]);
+          let _ = run_logged(&window, &cancel, "[brew]", cmd)?;
+        }
+      }
+      let git_ok2 = command_output(&path_env, "git", &["--version"]).is_ok();
+      if !git_ok2 {
+        return Err("未检测到 git。请先安装 git（推荐：Homebrew 安装 git，或安装 Xcode Command Line Tools）。".into());
+      }
+    }
+
+    emit_progress(&window, "node", "检测 Node.js…", 3, total);
+    let node_version_out = command_output(&path_env, "node", &["-v"]).ok();
+    let node_major = node_version_out.as_deref().and_then(parse_node_major);
+    let need_node = node_major.map(|m| m < MIN_NODE_MAJOR).unwrap_or(true);
+    if need_node {
+      #[cfg(target_os = "macos")]
+      {
+        let brew = find_brew(&path_env).ok_or("未检测到 Node.js，且未检测到 brew。请先安装 Homebrew 或手动安装 Node.js。")?;
+        let mut cmd = Command::new(brew);
+        cmd.env("PATH", &path_env);
+        cmd.args(["install", "node"]);
+        let _ = run_logged(&window, &cancel, "[brew]", cmd)?;
+      }
+      #[cfg(not(target_os = "macos"))]
+      {
+        return Err(format!(
+          "未检测到可用 Node.js（需要 >= {MIN_NODE_MAJOR}）。请先安装 Node.js 后重试。"
+        ));
+      }
+    }
+
+    let node_version_out2 = command_output(&path_env, "node", &["-v"]).map_err(|_| "安装后仍未检测到 node".to_string())?;
+    let node_major2 = parse_node_major(&node_version_out2).ok_or("无法解析 node 版本")?;
+    if node_major2 < MIN_NODE_MAJOR {
+      return Err(format!("Node.js 版本过低：{node_version_out2}（需要 >= {MIN_NODE_MAJOR}）"));
+    }
+
+    // Ensure npm exists (some Node installations might be incomplete).
+    let npm_ok = command_output(&path_env, "npm", &["-v"]).is_ok();
+    if !npm_ok {
+      return Err("未检测到 npm。请确认 Node.js 安装完整，或重新安装 Node.js 后重试。".into());
+    }
+
+    emit_progress(&window, "openclaw", "全局安装 openclaw…", 4, total);
+    check_canceled(&cancel)?;
+    let mut npm_cmd = Command::new("npm");
+    npm_cmd.env("PATH", &path_env);
+    if let Some(reg) = options.npm_registry.as_ref() {
+      npm_cmd.env("npm_config_registry", reg);
+    }
+    npm_cmd.args(["install", "-g", &openclaw_package]);
+    let code = run_logged(&window, &cancel, "[npm]", npm_cmd)?;
+    if code != 0 {
+      return Err("npm install -g 失败，请查看日志。".into());
+    }
+
+    emit_progress(&window, "verify", "验证 openclaw 命令…", 5, total);
+    check_canceled(&cancel)?;
+    let info = get_openclaw_info(false);
+    if !info.installed {
+      let err = info.error.unwrap_or_else(|| "unknown".into());
+      return Err(format!("openclaw 安装完成，但无法执行 openclaw：{err}"));
+    }
+
+    let version = info.version.unwrap_or_else(|| "unknown".into());
+    emit_log(&window, "install-log", format!("openclaw --version => {version}"));
+    let _ = window.emit("install-progress", ProgressPayload {
+      stage: "done".into(),
+      title: "完成".into(),
+      index: total,
+      total,
+      percent: 1.0,
+    });
+    Ok(())
+  })();
+
+  state.finish();
+  result
+}
+
+#[tauri::command]
+pub async fn cancel_task(state: tauri::State<'_, TaskState>) -> Result<(), String> {
+  state.cancel();
   Ok(())
 }

@@ -55,11 +55,9 @@ window.installer = {
     return await invoke("uninstall_openclaw", {});
   },
   openExternal: async (url) => {
-    const { tauri } = assertTauri();
-    const shell = tauri?.shell;
-    if (!shell?.open) throw new Error("未启用 tauri shell 插件，无法打开外部链接。");
-    await shell.open(String(url));
-    return { ok: true };
+    const { invoke } = assertTauri();
+    await invoke("open_external", { url: String(url) });
+    return { ok: true, url: String(url) };
   },
   onProgress: (callback) => createListener("install-progress", callback),
   onLog: (callback) => createListener("install-log", callback),

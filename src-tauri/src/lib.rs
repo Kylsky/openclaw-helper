@@ -4,6 +4,7 @@ mod openclaw;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
+    .manage(commands::TaskState::default())
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(
@@ -21,6 +22,7 @@ pub fn run() {
       commands::run_openclaw,
       commands::open_dashboard,
       commands::open_wizard,
+      commands::open_external,
       commands::uninstall_openclaw,
       commands::start_install,
       commands::cancel_task
