@@ -365,6 +365,7 @@ button:disabled {
 
 .progressRow {
   margin-top: 6px;
+  gap: 14px;
 }
 
 .log {
