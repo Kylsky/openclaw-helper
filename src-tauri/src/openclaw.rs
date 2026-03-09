@@ -392,6 +392,53 @@ pub fn cleanup_mac_nvm_openclaw(openclaw_path: &Path, openclaw_package: &str) ->
   }
 }
 
+#[cfg(target_os = "macos")]
+pub fn cleanup_all_mac_nvm_openclaw(openclaw_package: &str) -> Result<Vec<String>, String> {
+  let home = env::var("HOME").unwrap_or_default();
+  if home.is_empty() {
+    return Ok(vec![]);
+  }
+  let nvm_versions = Path::new(&home).join(".nvm").join("versions").join("node");
+  let entries = match fs::read_dir(&nvm_versions) {
+    Ok(e) => e,
+    Err(_) => return Ok(vec![]),
+  };
+
+  let mut removed: Vec<String> = Vec::new();
+  for entry in entries.flatten() {
+    let path = entry.path();
+    if !path.is_dir() {
+      continue;
+    }
+    let bin_openclaw = path.join("bin").join("openclaw");
+    let module_dir = path.join("lib").join("node_modules").join(openclaw_package);
+    let module_dir_fallback = path.join("lib").join("node_modules").join("openclaw");
+
+    for (target, label) in [
+      (bin_openclaw, "bin"),
+      (module_dir, "module"),
+      (module_dir_fallback, "module"),
+    ] {
+      if !target.exists() {
+        continue;
+      }
+      if target.is_dir() {
+        fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
+      } else {
+        fs::remove_file(&target).map_err(|e| e.to_string())?;
+      }
+      removed.push(format!("{label}: {}", target.to_string_lossy()));
+    }
+  }
+
+  Ok(removed)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn cleanup_all_mac_nvm_openclaw(_openclaw_package: &str) -> Result<Vec<String>, String> {
+  Ok(vec![])
+}
+
 pub fn spawn_with_streaming_logs(
   mut cmd: Command,
   mut on_line: impl FnMut(String) + Send + 'static,

@@ -1,5 +1,5 @@
 use crate::openclaw::{
-  cleanup_mac_nvm_openclaw, get_openclaw_info, parse_gateway_status, resolve_openclaw,
+  cleanup_all_mac_nvm_openclaw, cleanup_mac_nvm_openclaw, get_openclaw_info, parse_gateway_status, resolve_openclaw,
   spawn_with_streaming_logs, GatewayStatus, OpenclawInfo,
 };
 use serde::Deserialize;
@@ -224,9 +224,10 @@ pub async fn uninstall_openclaw(window: Window) -> Result<(), String> {
   let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
   let openclaw_cmd = resolved.command.clone();
 
+  emit_log(&window, "install-log", "[uninstall] start");
   emit_log(
     &window,
-    "openclaw-log",
+    "install-log",
     "openclaw uninstall --service --state --workspace --yes --non-interactive",
   );
 
@@ -243,14 +244,14 @@ pub async fn uninstall_openclaw(window: Window) -> Result<(), String> {
       "--non-interactive",
     ]);
     let w = window.clone();
-    let code = spawn_with_streaming_logs(cmd, move |line| emit_log(&w, "openclaw-log", line))?;
+    let code = spawn_with_streaming_logs(cmd, move |line| emit_log(&w, "install-log", line))?;
     if code != 0 {
       return Err(format!("openclaw uninstall 失败（退出码 {code}）"));
     }
   }
 
   // 2) Best-effort remove CLI from common managers.
-  emit_log(&window, "openclaw-log", "正在尝试移除 openclaw CLI（brew / npm / pnpm / nvm）…");
+  emit_log(&window, "install-log", "正在尝试移除 openclaw CLI（brew / npm / pnpm / nvm）…");
 
   #[cfg(target_os = "macos")]
   {
@@ -281,16 +282,17 @@ pub async fn uninstall_openclaw(window: Window) -> Result<(), String> {
 
   // nvm scan cleanup (delete ~/.nvm/... copy if that's where we resolved from)
   {
-    let removed = cleanup_mac_nvm_openclaw(&openclaw_cmd, "openclaw").unwrap_or_default();
+    let mut removed = cleanup_mac_nvm_openclaw(&openclaw_cmd, "openclaw").unwrap_or_default();
+    removed.extend(cleanup_all_mac_nvm_openclaw("openclaw").unwrap_or_default());
     if !removed.is_empty() {
-      emit_log(&window, "openclaw-log", format!("[cleanup] nvm: removed {} item(s)", removed.len()));
+      emit_log(&window, "install-log", format!("[cleanup] nvm: removed {} item(s)", removed.len()));
       for item in removed {
-        emit_log(&window, "openclaw-log", format!("[cleanup] nvm: {item}"));
+        emit_log(&window, "install-log", format!("[cleanup] nvm: {item}"));
       }
     }
   }
 
-  emit_log(&window, "openclaw-log", "卸载完成。");
+  emit_log(&window, "install-log", "卸载完成。");
   Ok(())
 }
 

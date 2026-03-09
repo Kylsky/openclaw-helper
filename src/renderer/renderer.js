@@ -325,13 +325,20 @@ updateBtn.addEventListener("click", async () => {
 if (uninstallBtn) {
   uninstallBtn.addEventListener("click", async () => {
     if (taskRunning) return;
+    showLogsCheckbox.checked = true;
+    updateLogVisibility();
+    appendLog("[ui] 点击卸载");
     const confirmed = window.confirm(
       "将执行 openclaw 卸载（service/state/workspace），并尝试自动移除 CLI（brew / npm / pnpm）。是否继续？"
     );
-    if (!confirmed) return;
+    if (!confirmed) {
+      appendLog("[ui] 用户取消卸载");
+      return;
+    }
 
     setTaskRunning(true);
     logEl.textContent = "";
+    appendLog("[ui] 开始卸载…");
     setStage("卸载中…");
     setProgress(0.05);
 
