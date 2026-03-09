@@ -374,13 +374,6 @@ gatewayStatusBtn.addEventListener("click", async () => {
   await refreshGatewayStatus();
 });
 
-if (gatewayInstallBtn) {
-  gatewayInstallBtn.addEventListener("click", async () => {
-    await runOpenclaw(["gateway", "install"], { stageLabel: "安装网关服务…" });
-    await refreshGatewayStatus();
-  });
-}
-
 doctorBtn.addEventListener("click", async () => {
   await runOpenclaw(["doctor", "--fix", "--yes", "--non-interactive"], { stageLabel: "健康检查/修复…" });
 });
