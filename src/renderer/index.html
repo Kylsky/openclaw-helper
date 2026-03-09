@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self';" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenClaw 助手</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="title">OpenClaw 助手</div>
+      <div id="subtitle" class="subtitle">准备中…</div>
+    </header>
+
+    <section id="installerCard" class="card hidden">
+      <h2>一键安装</h2>
+      <div class="actions">
+        <button id="installBtn" type="button">开始安装</button>
+        <button id="cancelBtn" class="secondary" type="button" disabled>取消</button>
+      </div>
+    </section>
+
+    <section id="dashboardCard" class="card hidden">
+      <h2>控制台</h2>
+      <div class="row">
+        <div id="versionPill" class="pill">version: -</div>
+        <div id="gatewayStatusPill" class="pill">网关：检测中…</div>
+        <button id="refreshBtn" class="secondary" type="button">刷新</button>
+      </div>
+      <div class="actions">
+        <button id="openDashboardBtn" type="button">打开控制台</button>
+        <button id="openWizardBtn" class="secondary" type="button">开始配置</button>
+      </div>
+      <div class="featureGrid">
+        <div class="featureCard">
+          <div class="featureTitle">网关服务</div>
+          <div class="featureDesc">用于消息、助手与控制台的本地服务。若检测到未安装，将显示“安装服务”。</div>
+          <div class="featureActions">
+            <button id="gatewayInstallBtn" class="secondary hidden" type="button">安装服务</button>
+            <button id="gatewayStartBtn" type="button">启动</button>
+            <button id="gatewayStopBtn" class="secondary" type="button">停止</button>
+            <button id="gatewayStatusBtn" class="secondary" type="button">检查状态</button>
+          </div>
+        </div>
+
+
+
+        <div class="featureCard">
+          <div class="featureTitle">健康检查</div>
+          <div class="featureDesc">检查配置与服务状态，并尝试自动修复常见问题。</div>
+          <div class="featureActions">
+            <button id="doctorBtn" type="button">一键修复</button>
+          </div>
+        </div>
+
+        <div class="featureCard">
+          <div class="featureTitle">更新</div>
+          <div class="featureDesc">切换/更新到稳定版、测试版或开发版。</div>
+          <div class="featureForm">
+            <select id="updateChannel">
+              <option value="stable" selected>稳定版（stable）</option>
+              <option value="beta">测试版（beta）</option>
+              <option value="dev">开发版（dev）</option>
+            </select>
+          </div>
+          <div class="featureActions">
+            <button id="updateBtn" type="button">更新</button>
+          </div>
+        </div>
+
+        <div class="featureCard">
+          <div class="featureTitle">卸载</div>
+          <div class="featureDesc">调用 openclaw 自带卸载命令：openclaw uninstall --yes。</div>
+          <div class="featureActions">
+            <button id="uninstallBtn" class="secondary" type="button">卸载 OpenClaw</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>进度</h2>
+      <div id="stageText" class="stage">等待开始…</div>
+      <div class="progress">
+        <div id="progressBar" class="progressBar" style="width: 0%"></div>
+      </div>
+      <div id="progressText" class="progressText">0%</div>
+      <div class="row">
+        <button id="stopBtn" class="secondary" type="button" disabled>取消当前任务</button>
+        <label class="toggle inline">
+          <input id="showLogs" type="checkbox" checked />
+          显示日志
+        </label>
+      </div>
+    </section>
+
+    <section id="logCard" class="card hidden">
+      <h2>日志</h2>
+      <pre id="log" class="log"></pre>
+    </section>
+  </div>
+
+  <script src="./renderer.js"></script>
+</body>
+
+</html>

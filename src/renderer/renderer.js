@@ -1,0 +1,387 @@
+/* global installer */
+
+const el = (id) => document.getElementById(id);
+
+const subtitleEl = el("subtitle");
+const installerCard = el("installerCard");
+const dashboardCard = el("dashboardCard");
+const versionPill = el("versionPill");
+const gatewayStatusPill = el("gatewayStatusPill");
+const refreshBtn = el("refreshBtn");
+const openDashboardBtn = el("openDashboardBtn");
+const openWizardBtn = el("openWizardBtn");
+
+const installBtn = el("installBtn");
+const cancelBtn = el("cancelBtn");
+const stopBtn = el("stopBtn");
+const showLogsCheckbox = el("showLogs");
+const logCard = el("logCard");
+const logEl = el("log");
+
+const stageText = el("stageText");
+const progressBar = el("progressBar");
+const progressText = el("progressText");
+
+const gatewayInstallBtn = el("gatewayInstallBtn");
+const gatewayStartBtn = el("gatewayStartBtn");
+const gatewayStopBtn = el("gatewayStopBtn");
+const gatewayStatusBtn = el("gatewayStatusBtn");
+const doctorBtn = el("doctorBtn");
+const updateBtn = el("updateBtn");
+const updateChannel = el("updateChannel");
+const uninstallBtn = el("uninstallBtn");
+
+let taskRunning = false;
+let cachedGatewayUrl = null;
+let cachedGatewayState = "unknown";
+
+function applyGatewayActionAvailability() {
+  const hasInstallBtn = Boolean(gatewayInstallBtn);
+  const isNotInstalled = cachedGatewayState === "not_installed";
+
+  if (hasInstallBtn) {
+    if (isNotInstalled) gatewayInstallBtn.classList.remove("hidden");
+    else gatewayInstallBtn.classList.add("hidden");
+    gatewayInstallBtn.disabled = taskRunning;
+  }
+
+  gatewayStartBtn.disabled = taskRunning || isNotInstalled;
+  gatewayStopBtn.disabled = taskRunning || isNotInstalled;
+  gatewayStatusBtn.disabled = taskRunning;
+}
+
+function isMissingOpenclawError(error) {
+  const message = String(error?.message || error || "");
+  return /未检测到 openclaw/i.test(message) || /ENOENT/i.test(message);
+}
+
+async function rerouteIfOpenclawMissing(error) {
+  if (!isMissingOpenclawError(error)) return false;
+  try {
+    await checkAndRoute();
+  } catch {
+    // ignore
+  }
+  return true;
+}
+
+function setStage(text) {
+  stageText.textContent = text;
+}
+
+function setProgress(percent) {
+  const clamped = Math.max(0, Math.min(1, percent ?? 0));
+  progressBar.style.width = `${Math.round(clamped * 100)}%`;
+  progressText.textContent = `${Math.round(clamped * 100)}%`;
+}
+
+function appendLog(line) {
+  logEl.textContent += `${line}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function updateLogVisibility() {
+  if (showLogsCheckbox.checked) {
+    logCard.classList.remove("hidden");
+  } else {
+    logCard.classList.add("hidden");
+  }
+}
+
+function setTaskRunning(value) {
+  taskRunning = value;
+  installBtn.disabled = value;
+  cancelBtn.disabled = !value;
+  stopBtn.disabled = !value;
+
+  openDashboardBtn.disabled = value;
+  openWizardBtn.disabled = value;
+
+  applyGatewayActionAvailability();
+  doctorBtn.disabled = value;
+  updateBtn.disabled = value;
+  if (uninstallBtn) uninstallBtn.disabled = value;
+  refreshBtn.disabled = value;
+}
+
+function showInstaller() {
+  subtitleEl.textContent = "一键安装";
+  installerCard.classList.remove("hidden");
+  dashboardCard.classList.add("hidden");
+}
+
+function showDashboard(version) {
+  subtitleEl.textContent = "已安装";
+  versionPill.textContent = `version: ${version ?? "-"}`;
+  gatewayStatusPill.textContent = "网关：检测中…";
+  installerCard.classList.add("hidden");
+  dashboardCard.classList.remove("hidden");
+  applyGatewayActionAvailability();
+}
+
+function setGatewayStatus(status) {
+  const state = status?.state || "unknown";
+  const textMap = {
+    running: "运行中",
+    stopped: "未运行",
+    not_installed: "未安装",
+    unknown: "未知"
+  };
+
+  const label = textMap[state] ?? "未知";
+  gatewayStatusPill.textContent = `网关：${label}`;
+
+  cachedGatewayState = state;
+  cachedGatewayUrl = status?.dashboardUrl || null;
+  applyGatewayActionAvailability();
+}
+
+async function refreshGatewayStatus() {
+  try {
+    const status = await installer.getGatewayStatus();
+    setGatewayStatus(status);
+  } catch (error) {
+    cachedGatewayUrl = null;
+    gatewayStatusPill.textContent = "网关：检测失败";
+    appendLog(`[错误] ${error?.message || String(error)}`);
+    await rerouteIfOpenclawMissing(error);
+  }
+}
+
+async function checkAndRoute() {
+  subtitleEl.textContent = "检测中…";
+  try {
+    const info = await installer.checkOpenclaw();
+    if (info?.installed) {
+      showDashboard(info.version);
+      setStage("就绪");
+      setProgress(1);
+      await refreshGatewayStatus();
+      return true;
+    }
+  } catch (error) {
+    appendLog(`[错误] ${error?.message || String(error)}`);
+  }
+
+  cachedGatewayUrl = null;
+  cachedGatewayState = "unknown";
+  showInstaller();
+  setStage("等待开始…");
+  setProgress(0);
+  return false;
+}
+
+async function runOpenclaw(args, { stageLabel }) {
+  if (taskRunning) return;
+  setTaskRunning(true);
+  logEl.textContent = "";
+  setStage(stageLabel || "执行中…");
+  setProgress(0.05);
+
+  try {
+    await installer.runOpenclaw(args);
+    setStage("完成");
+    setProgress(1);
+  } catch (error) {
+    const message = error?.message || String(error);
+    setStage("失败");
+    appendLog(`[错误] ${message}`);
+    showLogsCheckbox.checked = true;
+    updateLogVisibility();
+    await rerouteIfOpenclawMissing(error);
+  } finally {
+    setTaskRunning(false);
+    await checkAndRoute();
+  }
+}
+
+showLogsCheckbox.addEventListener("change", () => updateLogVisibility());
+
+stopBtn.addEventListener("click", async () => {
+  if (!taskRunning) return;
+  await installer.cancelTask();
+});
+
+cancelBtn.addEventListener("click", async () => {
+  if (!taskRunning) return;
+  await installer.cancelTask();
+});
+
+installBtn.addEventListener("click", async () => {
+  if (taskRunning) return;
+  setTaskRunning(true);
+  logEl.textContent = "";
+  setStage("安装中…");
+  setProgress(0);
+
+  try {
+    await installer.startInstall({});
+    setStage("完成");
+    setProgress(1);
+
+    // After install, verify `openclaw --version` (via checkOpenclaw) and then
+    // automatically open the onboarding wizard.
+    try {
+      const info = await installer.checkOpenclaw();
+      if (info?.installed) {
+        setStage("打开配置向导…");
+        await installer.openWizard();
+      }
+    } catch (error) {
+      appendLog(`[错误] ${error?.message || String(error)}`);
+    }
+  } catch (error) {
+    const message = error?.message || String(error);
+    setStage("失败");
+    appendLog(`[错误] ${message}`);
+    showLogsCheckbox.checked = true;
+    updateLogVisibility();
+  } finally {
+    setTaskRunning(false);
+    await checkAndRoute();
+  }
+});
+
+refreshBtn.addEventListener("click", async () => {
+  await checkAndRoute();
+});
+
+openDashboardBtn.addEventListener("click", async () => {
+  if (taskRunning) return;
+  setTaskRunning(true);
+  try {
+    // Prefer the Dashboard URL from gateway status when available, since it's
+    // fast and avoids extra command parsing. Fall back to `openclaw dashboard`
+    // lookup when we don't have a cached URL yet.
+    if (!cachedGatewayUrl) {
+      try {
+        const status = await installer.getGatewayStatus();
+        setGatewayStatus(status);
+      } catch {
+        // ignore
+      }
+    }
+
+    if (cachedGatewayUrl) {
+      await installer.openExternal(cachedGatewayUrl);
+      return;
+    }
+
+    await installer.openDashboard();
+  } catch (error) {
+    appendLog(`[错误] ${error?.message || String(error)}`);
+    showLogsCheckbox.checked = true;
+    updateLogVisibility();
+    await rerouteIfOpenclawMissing(error);
+  } finally {
+    setTaskRunning(false);
+  }
+});
+
+openWizardBtn.addEventListener("click", async () => {
+  if (taskRunning) return;
+  setTaskRunning(true);
+  try {
+    await installer.openWizard();
+  } catch (error) {
+    appendLog(`[错误] ${error?.message || String(error)}`);
+    showLogsCheckbox.checked = true;
+    updateLogVisibility();
+    await rerouteIfOpenclawMissing(error);
+  } finally {
+    setTaskRunning(false);
+  }
+});
+
+gatewayStartBtn.addEventListener("click", async () => {
+  await runOpenclaw(["gateway", "start"], { stageLabel: "启动网关服务…" });
+});
+
+gatewayStopBtn.addEventListener("click", async () => {
+  await runOpenclaw(["gateway", "stop"], { stageLabel: "停止网关服务…" });
+});
+
+gatewayStatusBtn.addEventListener("click", async () => {
+  await runOpenclaw(["gateway", "status"], { stageLabel: "检查网关状态…" });
+  await refreshGatewayStatus();
+});
+
+if (gatewayInstallBtn) {
+  gatewayInstallBtn.addEventListener("click", async () => {
+    await runOpenclaw(["gateway", "install"], { stageLabel: "安装网关服务…" });
+    await refreshGatewayStatus();
+  });
+}
+
+doctorBtn.addEventListener("click", async () => {
+  await runOpenclaw(["doctor", "--fix", "--yes", "--non-interactive"], { stageLabel: "健康检查/修复…" });
+});
+
+updateBtn.addEventListener("click", async () => {
+  const channel = updateChannel.value || "stable";
+  await runOpenclaw(["update", "--channel", channel, "--yes"], { stageLabel: "更新中…" });
+});
+
+if (uninstallBtn) {
+  uninstallBtn.addEventListener("click", async () => {
+    if (taskRunning) return;
+    const confirmed = window.confirm(
+      "将执行 openclaw 卸载（service/state/workspace），并尝试自动移除 CLI（brew / npm / pnpm）。是否继续？"
+    );
+    if (!confirmed) return;
+
+    setTaskRunning(true);
+    logEl.textContent = "";
+    setStage("卸载中…");
+    setProgress(0.05);
+
+    let routed = false;
+    try {
+      await installer.uninstallOpenclaw();
+      setStage("检测 openclaw 命令是否仍存在…");
+      routed = await checkAndRoute();
+      if (!routed) {
+        appendLog("openclaw 命令已移除，已切换到安装界面。");
+      } else {
+        setStage("完成");
+        setProgress(1);
+      }
+    } catch (error) {
+      setStage("失败");
+      appendLog(`[错误] ${error?.message || String(error)}`);
+      showLogsCheckbox.checked = true;
+      updateLogVisibility();
+    } finally {
+      setTaskRunning(false);
+      if (!routed) await checkAndRoute();
+    }
+  });
+}
+
+installer.onProgress((payload) => {
+  const percent = payload?.percent;
+  if (percent != null) setProgress(percent);
+  if (payload?.stage === "done") {
+    setStage("完成");
+    return;
+  }
+  if (payload?.index && payload?.total) {
+    setStage(`安装中…（${payload.index}/${payload.total}）`);
+    return;
+  }
+  setStage("安装中…");
+});
+
+installer.onLog((payload) => {
+  if (!payload?.message) return;
+  appendLog(payload.message);
+});
+
+installer.onOpenclawLog((payload) => {
+  if (!payload?.message) return;
+  appendLog(payload.message);
+});
+
+updateLogVisibility();
+setTaskRunning(false);
+void checkAndRoute();
