@@ -638,7 +638,7 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
         .as_deref()
         .map(|v| v.trim())
         .filter(|v| !v.is_empty())
-        .unwrap_or("openai");
+        .unwrap_or("gpt-5.4");
       let api_key = options.custom_api_key.as_deref().unwrap_or("").trim().to_string();
       if api_key.is_empty() {
         return Err("缺少 CUSTOM_API_KEY（用于 openclaw onboard）。".into());
