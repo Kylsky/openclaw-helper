@@ -287,17 +287,8 @@ installBtn.addEventListener("click", async () => {
     setStage("完成");
     setProgress(1);
 
-    // After install, verify `openclaw --version` (via checkOpenclaw) and then
-    // automatically open the onboarding wizard.
-    try {
-      const info = await installer.checkOpenclaw();
-      if (info?.installed) {
-        setStage("打开配置向导…");
-        await installer.openWizard();
-      }
-    } catch (error) {
-      appendLog(`[错误] ${error?.message || String(error)}`);
-    }
+    // Tauri 版本会在安装完成后自动执行 non-interactive onboard（如果提供了 CUSTOM_API_KEY），
+    // 因此这里不再自动打开交互式向导终端窗口。
   } catch (error) {
     const message = error?.message || String(error);
     setStage("失败");
