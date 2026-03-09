@@ -1,6 +1,6 @@
 use crate::openclaw::{
   cleanup_all_mac_nvm_openclaw, cleanup_mac_nvm_openclaw, get_openclaw_info, parse_gateway_status, resolve_openclaw,
-  spawn_with_streaming_logs, GatewayStatus, OpenclawInfo,
+  spawn_with_streaming_logs_cancelable, GatewayStatus, OpenclawInfo,
 };
 use serde::Deserialize;
 use serde::Serialize;
@@ -121,28 +121,35 @@ pub async fn get_gateway_status() -> GatewayStatus {
 }
 
 #[tauri::command]
-pub async fn run_openclaw(window: Window, args: Vec<String>) -> Result<(), String> {
+pub async fn run_openclaw(window: Window, state: tauri::State<'_, TaskState>, args: Vec<String>) -> Result<(), String> {
   if args.is_empty() {
     return Err("缺少 openclaw 参数".into());
   }
+  let cancel = state.start()?;
   let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
 
-  emit_log(&window, "openclaw-log", format!("openclaw {} ({})", args.join(" "), resolved.source));
+  let result = (|| -> Result<(), String> {
+    emit_log(&window, "openclaw-log", format!("openclaw {} ({})", args.join(" "), resolved.source));
 
-  let mut cmd = Command::new(&resolved.command);
-  cmd.env("PATH", &resolved.path_env);
-  cmd.arg("--no-color");
-  for a in args {
-    cmd.arg(a);
-  }
+    let mut cmd = Command::new(&resolved.command);
+    cmd.env("PATH", &resolved.path_env);
+    cmd.arg("--no-color");
+    for a in args {
+      cmd.arg(a);
+    }
 
-  let w = window.clone();
-  let code = spawn_with_streaming_logs(cmd, move |line| emit_log(&w, "openclaw-log", line))?;
-  if code == 0 {
-    Ok(())
-  } else {
-    Err(format!("openclaw 退出码：{code}"))
-  }
+    let w = window.clone();
+    let cancel2 = cancel.clone();
+    let code = spawn_with_streaming_logs_cancelable(cmd, cancel2, move |line| emit_log(&w, "openclaw-log", line))?;
+    if code == 0 {
+      Ok(())
+    } else {
+      Err(format!("openclaw 退出码：{code}"))
+    }
+  })();
+
+  state.finish();
+  result
 }
 
 #[tauri::command]
@@ -220,80 +227,91 @@ pub async fn open_external(app: AppHandle, url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn uninstall_openclaw(window: Window) -> Result<(), String> {
+pub async fn uninstall_openclaw(window: Window, state: tauri::State<'_, TaskState>) -> Result<(), String> {
+  let cancel = state.start()?;
   let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
   let openclaw_cmd = resolved.command.clone();
 
-  emit_log(&window, "install-log", "[uninstall] start");
-  emit_log(
-    &window,
-    "install-log",
-    "openclaw uninstall --service --state --workspace --yes --non-interactive",
-  );
+  let result = (|| -> Result<(), String> {
+    emit_log(&window, "install-log", "[uninstall] start");
+    emit_log(
+      &window,
+      "install-log",
+      "openclaw uninstall --service --state --workspace --yes --non-interactive",
+    );
 
-  // 1) OpenClaw's own uninstaller (service/state/workspace).
-  {
-    let mut cmd = Command::new(&openclaw_cmd);
-    cmd.env("PATH", &resolved.path_env);
-    cmd.args([
-      "uninstall",
-      "--service",
-      "--state",
-      "--workspace",
-      "--yes",
-      "--non-interactive",
-    ]);
-    let w = window.clone();
-    let code = spawn_with_streaming_logs(cmd, move |line| emit_log(&w, "install-log", line))?;
-    if code != 0 {
-      return Err(format!("openclaw uninstall 失败（退出码 {code}）"));
-    }
-  }
-
-  // 2) Best-effort remove CLI from common managers.
-  emit_log(&window, "install-log", "正在尝试移除 openclaw CLI（brew / npm / pnpm / nvm）…");
-
-  #[cfg(target_os = "macos")]
-  {
-    let brew_candidates = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew", "brew"];
-    for brew in brew_candidates {
-      let mut cmd = Command::new(brew);
+    // 1) OpenClaw's own uninstaller (service/state/workspace).
+    {
+      let mut cmd = Command::new(&openclaw_cmd);
       cmd.env("PATH", &resolved.path_env);
-      cmd.args(["uninstall", "openclaw"]);
-      let _ = cmd.output();
-    }
-  }
-
-  // npm uninstall -g openclaw (best-effort)
-  {
-    let mut cmd = Command::new("npm");
-    cmd.env("PATH", &resolved.path_env);
-    cmd.args(["uninstall", "-g", "openclaw"]);
-    let _ = cmd.output();
-  }
-
-  // pnpm remove -g openclaw (best-effort)
-  {
-    let mut cmd = Command::new("pnpm");
-    cmd.env("PATH", &resolved.path_env);
-    cmd.args(["remove", "-g", "openclaw"]);
-    let _ = cmd.output();
-  }
-
-  // nvm scan cleanup (delete ~/.nvm/... copy if that's where we resolved from)
-  {
-    let mut removed = cleanup_mac_nvm_openclaw(&openclaw_cmd, "openclaw").unwrap_or_default();
-    removed.extend(cleanup_all_mac_nvm_openclaw("openclaw").unwrap_or_default());
-    if !removed.is_empty() {
-      emit_log(&window, "install-log", format!("[cleanup] nvm: removed {} item(s)", removed.len()));
-      for item in removed {
-        emit_log(&window, "install-log", format!("[cleanup] nvm: {item}"));
+      cmd.args([
+        "uninstall",
+        "--service",
+        "--state",
+        "--workspace",
+        "--yes",
+        "--non-interactive",
+      ]);
+      let w = window.clone();
+      let cancel2 = cancel.clone();
+      let code = spawn_with_streaming_logs_cancelable(cmd, cancel2, move |line| emit_log(&w, "install-log", line))?;
+      if code != 0 {
+        return Err(format!("openclaw uninstall 失败（退出码 {code}）"));
       }
     }
-  }
 
-  emit_log(&window, "install-log", "卸载完成。");
-  Ok(())
+    // 2) Best-effort remove CLI from common managers.
+    emit_log(&window, "install-log", "正在尝试移除 openclaw CLI（brew / npm / pnpm / nvm）…");
+
+    #[cfg(target_os = "macos")]
+    {
+      let brew_candidates = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew", "brew"];
+      for brew in brew_candidates {
+        check_canceled(&cancel)?;
+        let mut cmd = Command::new(brew);
+        cmd.env("PATH", &resolved.path_env);
+        cmd.args(["uninstall", "openclaw"]);
+        let _ = cmd.output();
+      }
+    }
+
+    // npm uninstall -g openclaw (best-effort)
+    {
+      check_canceled(&cancel)?;
+      let mut cmd = Command::new("npm");
+      cmd.env("PATH", &resolved.path_env);
+      cmd.args(["uninstall", "-g", "openclaw"]);
+      let _ = cmd.output();
+    }
+
+    // pnpm remove -g openclaw (best-effort)
+    {
+      check_canceled(&cancel)?;
+      let mut cmd = Command::new("pnpm");
+      cmd.env("PATH", &resolved.path_env);
+      cmd.args(["remove", "-g", "openclaw"]);
+      let _ = cmd.output();
+    }
+
+    // nvm scan cleanup (delete ~/.nvm/... copy if that's where we resolved from)
+    {
+      check_canceled(&cancel)?;
+      let mut removed = cleanup_mac_nvm_openclaw(&openclaw_cmd, "openclaw").unwrap_or_default();
+      removed.extend(cleanup_all_mac_nvm_openclaw("openclaw").unwrap_or_default());
+      if !removed.is_empty() {
+        emit_log(&window, "install-log", format!("[cleanup] nvm: removed {} item(s)", removed.len()));
+        for item in removed {
+          emit_log(&window, "install-log", format!("[cleanup] nvm: {item}"));
+        }
+      }
+    }
+
+    emit_log(&window, "install-log", "卸载完成。");
+    Ok(())
+  })();
+
+  state.finish();
+  result
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -369,12 +387,7 @@ fn run_logged(window: &Window, cancel: &Arc<AtomicBool>, label: &str, cmd: Comma
   let w = window.clone();
   let prefix = label.to_string();
   let cancel2 = cancel.clone();
-  spawn_with_streaming_logs(cmd, move |line| {
-    if cancel2.load(Ordering::SeqCst) {
-      return;
-    }
-    emit_log(&w, "install-log", format!("{prefix} {line}"));
-  })
+  spawn_with_streaming_logs_cancelable(cmd, cancel2, move |line| emit_log(&w, "install-log", format!("{prefix} {line}")))
 }
 
 fn format_command_for_log(cmd: &Command) -> String {

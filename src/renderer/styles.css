@@ -358,8 +358,13 @@ button:disabled {
 
 .progressText {
   margin-top: 8px;
+  margin-bottom: 10px;
   font-size: 12px;
   color: rgba(231, 238, 252, 0.72);
+}
+
+.progressRow {
+  margin-top: 6px;
 }
 
 .log {

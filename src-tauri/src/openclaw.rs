@@ -7,6 +7,8 @@ use std::fs;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedOpenclaw {
@@ -439,6 +441,7 @@ pub fn cleanup_all_mac_nvm_openclaw(_openclaw_package: &str) -> Result<Vec<Strin
   Ok(vec![])
 }
 
+#[allow(dead_code)]
 pub fn spawn_with_streaming_logs(
   mut cmd: Command,
   mut on_line: impl FnMut(String) + Send + 'static,
@@ -478,4 +481,66 @@ pub fn spawn_with_streaming_logs(
   let _ = err_thread.join();
   let _ = forward_thread.join();
   Ok(status.code().unwrap_or(-1))
+}
+
+pub fn spawn_with_streaming_logs_cancelable(
+  mut cmd: Command,
+  cancel: Arc<AtomicBool>,
+  mut on_line: impl FnMut(String) + Send + 'static,
+) -> Result<i32, String> {
+  cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+  let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+  let stdout = child.stdout.take().ok_or("stdout unavailable")?;
+  let stderr = child.stderr.take().ok_or("stderr unavailable")?;
+
+  let (tx, rx) = std::sync::mpsc::channel::<String>();
+  let tx_out = tx.clone();
+  let tx_err = tx.clone();
+
+  let out_thread = std::thread::spawn(move || {
+    let reader = std::io::BufReader::new(stdout);
+    for line in reader.lines().flatten() {
+      let _ = tx_out.send(line);
+    }
+  });
+
+  let err_thread = std::thread::spawn(move || {
+    let reader = std::io::BufReader::new(stderr);
+    for line in reader.lines().flatten() {
+      let _ = tx_err.send(format!("[stderr] {line}"));
+    }
+  });
+
+  drop(tx);
+
+  let forward_cancel = cancel.clone();
+  let forward_thread = std::thread::spawn(move || {
+    while let Ok(line) = rx.recv() {
+      if forward_cancel.load(AtomicOrdering::SeqCst) {
+        continue;
+      }
+      on_line(line);
+    }
+  });
+
+  loop {
+    if cancel.load(AtomicOrdering::SeqCst) {
+      let _ = child.kill();
+      let _ = child.wait();
+      let _ = out_thread.join();
+      let _ = err_thread.join();
+      let _ = forward_thread.join();
+      return Err("用户取消".into());
+    }
+
+    match child.try_wait().map_err(|e| e.to_string())? {
+      Some(status) => {
+        let _ = out_thread.join();
+        let _ = err_thread.join();
+        let _ = forward_thread.join();
+        return Ok(status.code().unwrap_or(-1));
+      }
+      None => std::thread::sleep(std::time::Duration::from_millis(120)),
+    }
+  }
 }
