@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::BufRead;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -455,18 +455,44 @@ pub fn spawn_with_streaming_logs(
   let tx_out = tx.clone();
   let tx_err = tx.clone();
 
-  let out_thread = std::thread::spawn(move || {
-    let reader = std::io::BufReader::new(stdout);
-    for line in reader.lines().flatten() {
-      let _ = tx_out.send(line);
+  let forward_stream = |mut input: Box<dyn Read + Send>, sender: std::sync::mpsc::Sender<String>, prefix: &'static str| {
+    let mut buf = [0u8; 4096];
+    let mut current: Vec<u8> = Vec::new();
+    loop {
+      let read = match input.read(&mut buf) {
+        Ok(0) => break,
+        Ok(n) => n,
+        Err(_) => break,
+      };
+      for &b in &buf[..read] {
+        if b == b'\n' || b == b'\r' {
+          if !current.is_empty() {
+            let line = String::from_utf8_lossy(&current).to_string();
+            let _ = sender.send(if prefix.is_empty() { line } else { format!("{prefix}{line}") });
+            current.clear();
+          }
+          continue;
+        }
+        current.push(b);
+        if current.len() > 16_384 {
+          let line = String::from_utf8_lossy(&current).to_string();
+          let _ = sender.send(if prefix.is_empty() { line } else { format!("{prefix}{line}") });
+          current.clear();
+        }
+      }
     }
+    if !current.is_empty() {
+      let line = String::from_utf8_lossy(&current).to_string();
+      let _ = sender.send(if prefix.is_empty() { line } else { format!("{prefix}{line}") });
+    }
+  };
+
+  let out_thread = std::thread::spawn(move || {
+    forward_stream(Box::new(stdout), tx_out, "");
   });
 
   let err_thread = std::thread::spawn(move || {
-    let reader = std::io::BufReader::new(stderr);
-    for line in reader.lines().flatten() {
-      let _ = tx_err.send(format!("[stderr] {line}"));
-    }
+    forward_stream(Box::new(stderr), tx_err, "[stderr] ");
   });
 
   drop(tx);
@@ -497,18 +523,44 @@ pub fn spawn_with_streaming_logs_cancelable(
   let tx_out = tx.clone();
   let tx_err = tx.clone();
 
-  let out_thread = std::thread::spawn(move || {
-    let reader = std::io::BufReader::new(stdout);
-    for line in reader.lines().flatten() {
-      let _ = tx_out.send(line);
+  let forward_stream = |mut input: Box<dyn Read + Send>, sender: std::sync::mpsc::Sender<String>, prefix: &'static str| {
+    let mut buf = [0u8; 4096];
+    let mut current: Vec<u8> = Vec::new();
+    loop {
+      let read = match input.read(&mut buf) {
+        Ok(0) => break,
+        Ok(n) => n,
+        Err(_) => break,
+      };
+      for &b in &buf[..read] {
+        if b == b'\n' || b == b'\r' {
+          if !current.is_empty() {
+            let line = String::from_utf8_lossy(&current).to_string();
+            let _ = sender.send(if prefix.is_empty() { line } else { format!("{prefix}{line}") });
+            current.clear();
+          }
+          continue;
+        }
+        current.push(b);
+        if current.len() > 16_384 {
+          let line = String::from_utf8_lossy(&current).to_string();
+          let _ = sender.send(if prefix.is_empty() { line } else { format!("{prefix}{line}") });
+          current.clear();
+        }
+      }
     }
+    if !current.is_empty() {
+      let line = String::from_utf8_lossy(&current).to_string();
+      let _ = sender.send(if prefix.is_empty() { line } else { format!("{prefix}{line}") });
+    }
+  };
+
+  let out_thread = std::thread::spawn(move || {
+    forward_stream(Box::new(stdout), tx_out, "");
   });
 
   let err_thread = std::thread::spawn(move || {
-    let reader = std::io::BufReader::new(stderr);
-    for line in reader.lines().flatten() {
-      let _ = tx_err.send(format!("[stderr] {line}"));
-    }
+    forward_stream(Box::new(stderr), tx_err, "[stderr] ");
   });
 
   drop(tx);

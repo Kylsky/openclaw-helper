@@ -7,6 +7,7 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Window};
@@ -416,6 +417,81 @@ fn command_output(path_env: &str, program: &str, args: &[&str]) -> Result<String
   ))
 }
 
+fn log_environment(window: &Window, cancel: &Arc<AtomicBool>, path_env: &str) {
+  let _ = check_canceled(cancel);
+  emit_log(window, "install-log", "== 环境诊断 ==");
+  emit_log(window, "install-log", format!("os: {} / {}", std::env::consts::OS, std::env::consts::ARCH));
+  emit_log(window, "install-log", format!("PATH: {path_env}"));
+
+  let safe_run = |label: &str, program: &str, args: &[&str]| {
+    if check_canceled(cancel).is_err() {
+      return;
+    }
+    let out = command_output(path_env, program, args)
+      .map(|t| split_lines(&t).join(" | "))
+      .unwrap_or_else(|e| format!("(failed: {e})"));
+    let short = if out.len() > 800 { format!("{}…", &out[..800]) } else { out };
+    emit_log(window, "install-log", format!("{label}: {short}"));
+  };
+
+  safe_run("brew", "brew", &["--version"]);
+  safe_run("git", "git", &["--version"]);
+  safe_run("node -v", "node", &["-v"]);
+  safe_run("node execPath", "node", &["-p", "process.execPath"]);
+  safe_run("npm -v", "npm", &["-v"]);
+  safe_run("npm prefix -g", "npm", &["prefix", "-g"]);
+  safe_run("npm config get prefix", "npm", &["config", "get", "prefix"]);
+  safe_run("npm config get userconfig", "npm", &["config", "get", "userconfig"]);
+
+  // nvm presence (macOS/Linux)
+  if let Ok(home) = std::env::var("HOME") {
+    if !home.is_empty() {
+      let nvm_dir = format!("{home}/.nvm");
+      emit_log(window, "install-log", format!("nvm dir: {}", if Path::new(&nvm_dir).exists() { "yes" } else { "no" }));
+      let versions_dir = format!("{home}/.nvm/versions/node");
+      if Path::new(&versions_dir).exists() {
+        if let Ok(entries) = std::fs::read_dir(&versions_dir) {
+          let mut versions: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+            .collect();
+          versions.sort();
+          if !versions.is_empty() {
+            let joined = versions.join(", ");
+            emit_log(window, "install-log", format!("nvm node versions: {joined}"));
+          }
+        }
+      }
+    }
+  }
+
+  // openclaw resolution
+  match resolve_openclaw() {
+    Some(resolved) => {
+      emit_log(
+        window,
+        "install-log",
+        format!("openclaw resolved: {} ({})", resolved.command.to_string_lossy(), resolved.source),
+      );
+      let mut cmd = Command::new(&resolved.command);
+      cmd.env("PATH", &resolved.path_env);
+      cmd.arg("--version");
+      let out = cmd.output().ok().map(|o| {
+        let s = format!(
+          "{}\n{}",
+          String::from_utf8_lossy(&o.stdout),
+          String::from_utf8_lossy(&o.stderr)
+        );
+        split_lines(&s).into_iter().next().unwrap_or_else(|| "(no output)".into())
+      });
+      emit_log(window, "install-log", format!("openclaw --version: {}", out.unwrap_or_else(|| "(failed)".into())));
+    }
+    None => emit_log(window, "install-log", "openclaw resolved: (not found)"),
+  }
+
+  emit_log(window, "install-log", "== 诊断结束 ==");
+}
+
 #[tauri::command]
 pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, options: InstallOptions) -> Result<(), String> {
   const MIN_NODE_MAJOR: u32 = 22;
@@ -431,6 +507,8 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
     if let Some(reg) = options.npm_registry.as_ref() {
       emit_log(&window, "install-log", format!("npm registry: {reg}"));
     }
+
+    log_environment(&window, &cancel, &path_env);
 
     check_canceled(&cancel)?;
 
@@ -489,6 +567,9 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
     check_canceled(&cancel)?;
     let mut npm_cmd = Command::new("npm");
     npm_cmd.env("PATH", &path_env);
+    npm_cmd.env("npm_config_progress", "false");
+    npm_cmd.env("npm_config_fund", "false");
+    npm_cmd.env("npm_config_audit", "false");
     if let Some(reg) = options.npm_registry.as_ref() {
       npm_cmd.env("npm_config_registry", reg);
     }
