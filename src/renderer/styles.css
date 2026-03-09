@@ -400,6 +400,44 @@ button:disabled {
   line-height: 1.4;
 }
 
+.logHtml {
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.logLine {
+  padding: 2px 4px;
+  border-radius: 8px;
+}
+
+.logStep {
+  margin: 6px 0 4px;
+  padding: 6px 8px;
+  border-radius: 12px;
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  background: rgba(59, 130, 246, 0.1);
+  color: rgba(231, 238, 252, 0.96);
+  font-weight: 800;
+}
+
+.logError {
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.12);
+  color: rgba(255, 220, 220, 0.95);
+}
+
+.logWarn {
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  background: rgba(245, 158, 11, 0.1);
+  color: rgba(255, 243, 220, 0.95);
+}
+
+.logCmd {
+  border: 1px solid rgba(231, 238, 252, 0.12);
+  background: rgba(0, 0, 0, 0.1);
+  color: rgba(231, 238, 252, 0.9);
+}
+
 .toggle {
   display: inline-flex;
   gap: 10px;

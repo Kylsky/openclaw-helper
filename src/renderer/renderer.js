@@ -137,7 +137,30 @@ function setProgress(percent) {
 }
 
 function appendLog(line) {
-  logEl.textContent += `${line}\n`;
+  const raw = String(line ?? "");
+
+  const escapeHtml = (value) =>
+    String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+
+  const classify = (text) => {
+    const trimmed = text.trim();
+    if (trimmed.startsWith("[错误]") || trimmed.startsWith("[前端错误]")) return "logLine logError";
+    if (trimmed.startsWith("[stderr]") || /npm warn/i.test(trimmed) || trimmed.startsWith("[警告]")) return "logLine logWarn";
+    if (trimmed.startsWith("[npm]") || trimmed.startsWith("[brew]") || trimmed.startsWith("[openclaw]") || trimmed.startsWith("[config]")) {
+      return "logLine logCmd";
+    }
+    if (/^\[ui\]/i.test(trimmed)) return "logLine";
+    return "logLine";
+  };
+
+  const klass = classify(raw);
+  const html = `<div class="${klass}">${escapeHtml(raw)}</div>`;
+  logEl.insertAdjacentHTML("beforeend", html);
   logEl.scrollTop = logEl.scrollHeight;
 }
 
@@ -396,17 +419,38 @@ if (uninstallBtn) {
   });
 }
 
+let lastProgressMarker = null;
+const escapeMini = (value) =>
+  String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 installer.onProgress((payload) => {
   const percent = payload?.percent;
   if (percent != null) setProgress(percent);
+
   if (payload?.stage === "done") {
     setStage("完成");
     return;
   }
+
   if (payload?.index && payload?.total) {
     setStage(`安装中…（${payload.index}/${payload.total}）`);
+
+    const title = payload?.title ? String(payload.title) : "进行中…";
+    const marker = `${payload.index}/${payload.total}:${payload.stage || ""}:${title}`;
+    if (marker !== lastProgressMarker) {
+      lastProgressMarker = marker;
+      const stepLine = `==> [${payload.index}/${payload.total}] ${title}`;
+      logEl.insertAdjacentHTML(
+        "beforeend",
+        `<div class="logStep">${escapeMini(stepLine)}</div>`
+      );
+      logEl.scrollTop = logEl.scrollHeight;
+    }
     return;
   }
+
   setStage("安装中…");
 });
 
