@@ -17,6 +17,16 @@ pub struct ResolvedOpenclaw {
   pub path_env: String,
 }
 
+pub fn home_dir() -> Option<PathBuf> {
+  if let Ok(home) = env::var("HOME") {
+    let trimmed = home.trim();
+    if !trimmed.is_empty() {
+      return Some(PathBuf::from(trimmed));
+    }
+  }
+  dirs::home_dir()
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct OpenclawInfo {
   pub installed: bool,
@@ -82,12 +92,7 @@ fn merge_path_entries(existing_path: Option<&str>, extra_entries: &[&str], extra
 
 pub fn create_base_path_env() -> String {
   let existing = env::var("PATH").ok();
-  let home = env::var("HOME").unwrap_or_default();
-  let local_bin = if home.is_empty() {
-    None
-  } else {
-    Some(format!("{home}/.local/bin"))
-  };
+  let local_bin = home_dir().map(|h| h.join(".local").join("bin").to_string_lossy().to_string());
 
   let mut extra: Vec<String> = vec![
     "/opt/homebrew/bin".into(),
@@ -192,9 +197,8 @@ pub fn resolve_openclaw() -> Option<ResolvedOpenclaw> {
   // 4) macOS backward-compat: scan ~/.nvm/versions/node/*/bin/openclaw
   #[cfg(target_os = "macos")]
   {
-    let home = env::var("HOME").unwrap_or_default();
-    if !home.is_empty() {
-      let nvm_versions = Path::new(&home).join(".nvm").join("versions").join("node");
+    if let Some(home) = home_dir() {
+      let nvm_versions = home.join(".nvm").join("versions").join("node");
       if let Ok(entries) = fs::read_dir(&nvm_versions) {
         let mut best: Option<((u32, u32, u32), PathBuf)> = None;
         for entry in entries.flatten() {
@@ -396,11 +400,10 @@ pub fn cleanup_mac_nvm_openclaw(openclaw_path: &Path, openclaw_package: &str) ->
 
 #[cfg(target_os = "macos")]
 pub fn cleanup_all_mac_nvm_openclaw(openclaw_package: &str) -> Result<Vec<String>, String> {
-  let home = env::var("HOME").unwrap_or_default();
-  if home.is_empty() {
+  let Some(home) = home_dir() else {
     return Ok(vec![]);
-  }
-  let nvm_versions = Path::new(&home).join(".nvm").join("versions").join("node");
+  };
+  let nvm_versions = home.join(".nvm").join("versions").join("node");
   let entries = match fs::read_dir(&nvm_versions) {
     Ok(e) => e,
     Err(_) => return Ok(vec![]),

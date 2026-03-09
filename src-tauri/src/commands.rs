@@ -515,19 +515,15 @@ fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), Strin
 fn expand_user_path(raw: &str) -> PathBuf {
   let trimmed = raw.trim();
   if trimmed == "~" {
-    if let Ok(home) = std::env::var("HOME") {
-      if !home.trim().is_empty() {
-        return PathBuf::from(home);
-      }
-    }
+    if let Some(home) = crate::openclaw::home_dir() {
+      return home;
+    };
   }
 
   if let Some(rest) = trimmed.strip_prefix("~/") {
-    if let Ok(home) = std::env::var("HOME") {
-      if !home.trim().is_empty() {
-        return PathBuf::from(home).join(rest);
-      }
-    }
+    if let Some(home) = crate::openclaw::home_dir() {
+      return home.join(rest);
+    };
   }
 
   PathBuf::from(trimmed)
@@ -635,22 +631,24 @@ fn log_environment(window: &Window, cancel: &Arc<AtomicBool>, path_env: &str) {
   safe_run("npm config get userconfig", "npm", &["config", "get", "userconfig"]);
 
   // nvm presence (macOS/Linux)
-  if let Ok(home) = std::env::var("HOME") {
-    if !home.is_empty() {
-      let nvm_dir = format!("{home}/.nvm");
-      emit_log(window, "install-log", format!("nvm dir: {}", if Path::new(&nvm_dir).exists() { "yes" } else { "no" }));
-      let versions_dir = format!("{home}/.nvm/versions/node");
-      if Path::new(&versions_dir).exists() {
-        if let Ok(entries) = std::fs::read_dir(&versions_dir) {
-          let mut versions: Vec<String> = entries
-            .flatten()
-            .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-            .collect();
-          versions.sort();
-          if !versions.is_empty() {
-            let joined = versions.join(", ");
-            emit_log(window, "install-log", format!("nvm node versions: {joined}"));
-          }
+  if let Some(home) = crate::openclaw::home_dir() {
+    let nvm_dir = home.join(".nvm");
+    emit_log(
+      window,
+      "install-log",
+      format!("nvm dir: {}", if nvm_dir.exists() { "yes" } else { "no" }),
+    );
+    let versions_dir = nvm_dir.join("versions").join("node");
+    if versions_dir.exists() {
+      if let Ok(entries) = std::fs::read_dir(&versions_dir) {
+        let mut versions: Vec<String> = entries
+          .flatten()
+          .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+          .collect();
+        versions.sort();
+        if !versions.is_empty() {
+          let joined = versions.join(", ");
+          emit_log(window, "install-log", format!("nvm node versions: {joined}"));
         }
       }
     }
@@ -662,7 +660,7 @@ fn log_environment(window: &Window, cancel: &Arc<AtomicBool>, path_env: &str) {
       emit_log(
         window,
         "install-log",
-        format!("openclaw resolved: {} ({})", resolved.command.to_string_lossy(), resolved.source),
+        format!("openclaw resolved: (found) ({})", resolved.source),
       );
       let mut cmd = Command::new(&resolved.command);
       cmd.env("PATH", &resolved.path_env);
@@ -834,7 +832,7 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
         "openai",
       ]);
 
-      let args_for_log: Vec<String> = std::iter::once(resolved.command.to_string_lossy().to_string())
+      let args_for_log: Vec<String> = std::iter::once("openclaw".to_string())
         .chain(cmd.get_args().map(|a| a.to_string_lossy().to_string()))
         .collect();
       emit_log(&window, "install-log", format!("[openclaw] {}", redact_sensitive_args(&args_for_log)));
