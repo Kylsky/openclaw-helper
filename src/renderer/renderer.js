@@ -22,7 +22,6 @@ const stageText = el("stageText");
 const progressBar = el("progressBar");
 const progressText = el("progressText");
 
-const gatewayInstallBtn = el("gatewayInstallBtn");
 const gatewayStartBtn = el("gatewayStartBtn");
 const gatewayStopBtn = el("gatewayStopBtn");
 const gatewayStatusBtn = el("gatewayStatusBtn");
@@ -97,16 +96,11 @@ function confirmModal({ title, body, confirmText = "确定", cancelText = "取�
 }
 
 function applyGatewayActionAvailability() {
-  const hasInstallBtn = Boolean(gatewayInstallBtn);
   const isNotInstalled = cachedGatewayState === "not_installed";
 
-  if (hasInstallBtn) {
-    if (isNotInstalled) gatewayInstallBtn.classList.remove("hidden");
-    else gatewayInstallBtn.classList.add("hidden");
-    gatewayInstallBtn.disabled = taskRunning;
-  }
-
-  gatewayStartBtn.disabled = taskRunning || isNotInstalled;
+  // We auto-handle service install when the user hits "Start" (so no dedicated
+  // "Install service" button is needed).
+  gatewayStartBtn.disabled = taskRunning;
   gatewayStopBtn.disabled = taskRunning || isNotInstalled;
   gatewayStatusBtn.disabled = taskRunning;
 }
@@ -181,11 +175,13 @@ function showDashboard(version) {
 }
 
 function setGatewayStatus(status) {
-  const state = status?.state || "unknown";
+  // Hide "not_installed" from the UI by normalizing it to "stopped".
+  // When users hit "Start", we will attempt `openclaw gateway install` first.
+  const rawState = status?.state || "unknown";
+  const state = rawState === "not_installed" ? "stopped" : rawState;
   const textMap = {
     running: "运行中",
     stopped: "未运行",
-    not_installed: "未安装",
     unknown: "未知"
   };
 
@@ -355,7 +351,18 @@ openWizardBtn.addEventListener("click", async () => {
 });
 
 gatewayStartBtn.addEventListener("click", async () => {
+  // If the service wasn't installed (or got removed), installing on-demand keeps
+  // the UI simpler while still being resilient.
+  try {
+    const status = await installer.getGatewayStatus();
+    if (status?.state === "not_installed") {
+      await runOpenclaw(["gateway", "install"], { stageLabel: "安装网关服务…" });
+    }
+  } catch {
+    // ignore and let start attempt run
+  }
   await runOpenclaw(["gateway", "start"], { stageLabel: "启动网关服务…" });
+  await refreshGatewayStatus();
 });
 
 gatewayStopBtn.addEventListener("click", async () => {
