@@ -1,0 +1,51 @@
+name: tauri-build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Tauri
+        run: npm run build -- --verbose
+
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-bundles-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/**
+            src-tauri/target/release/*.exe
+            src-tauri/target/release/*.msi
