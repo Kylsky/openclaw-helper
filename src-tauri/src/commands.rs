@@ -650,6 +650,7 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
       cmd.args([
         "onboard",
         "--non-interactive",
+        "--accept-risk",
         "--auth-choice",
         "custom-api-key",
         "--custom-base-url",
