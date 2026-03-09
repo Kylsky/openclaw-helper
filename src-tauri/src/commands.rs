@@ -783,6 +783,12 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
         "onboard",
         "--non-interactive",
         "--accept-risk",
+        "--install-daemon",
+        "--skip-ui",
+        "--skip-health",
+        "--skip-skills",
+        "--skip-search",
+        "--skip-channels",
         "--auth-choice",
         "custom-api-key",
         "--custom-base-url",
@@ -808,6 +814,13 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
         emit_log(&w, "install-log", format!("[openclaw] {line}"));
       })?;
       if code != 0 {
+        // On failure, print gateway status to help debugging common "gateway closed" cases.
+        emit_log(&window, "install-log", "[openclaw] onboard 失败，尝试输出 gateway status 以便排查…");
+        if let Ok(status_text) = run_openclaw_collect(&resolved, &["gateway", "status", "--no-color"]) {
+          for line in split_lines(&status_text).into_iter().take(60) {
+            emit_log(&window, "install-log", format!("[gateway] {line}"));
+          }
+        }
         return Err(format!("openclaw onboard 失败（退出码 {code}）"));
       }
 
