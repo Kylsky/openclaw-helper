@@ -3,9 +3,13 @@ name: tauri-build
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - codex/tauri-migration
+      - "tauri/**"
   pull_request:
-    branches: [main]
+    branches:
+      - codex/tauri-migration
+      - "tauri/**"
 
 jobs:
   build:
