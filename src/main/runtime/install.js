@@ -6,6 +6,7 @@ const os = require("node:os");
 
 const DEFAULT_OPENCLAW_PACKAGE = "openclaw";
 const DEFAULT_NPM_REGISTRY = "https://registry.npmmirror.com";
+const DEFAULT_GITHUB_MIRROR = "https://gitclone.com/github.com/";
 const MIN_NODE_MAJOR = 22;
 
 function assertNotAborted(signal) {
@@ -80,6 +81,11 @@ function safeUrl(url) {
   return parsed.toString();
 }
 
+function isDisableKeyword(value) {
+  const lower = String(value ?? "").trim().toLowerCase();
+  return ["off", "false", "none", "direct", "disable", "disabled", "0"].includes(lower);
+}
+
 function validateNpmPackageName(name) {
   const value = String(name ?? "").trim();
   if (!value) throw new Error("openclaw 包名不能为空");
@@ -109,11 +115,21 @@ function validateOptions(options) {
   const npmRegistryRaw = options?.npmRegistry != null ? String(options.npmRegistry).trim() : "";
   const npmRegistry = npmRegistryRaw ? safeUrl(npmRegistryRaw) : DEFAULT_NPM_REGISTRY;
 
+  const githubMirrorRaw = options?.githubMirror != null ? String(options.githubMirror).trim() : "";
+  let githubMirror = "";
+  if (githubMirrorRaw) {
+    githubMirror = isDisableKeyword(githubMirrorRaw) ? "" : safeUrl(githubMirrorRaw);
+  } else if (process.platform === "win32") {
+    githubMirror = DEFAULT_GITHUB_MIRROR;
+  }
+  if (githubMirror && !githubMirror.endsWith("/")) githubMirror += "/";
+
   return {
     autoInstall,
     openclawPackage,
     nodeChannel,
-    npmRegistry
+    npmRegistry,
+    githubMirror
   };
 }
 
@@ -1006,9 +1022,22 @@ async function verifyEnvironment({ env, signal, onLog, options: _options, contex
   onLog?.(`环境校验通过（macOS, Node major=${major}）`);
 }
 
-function withGithubSshRewriteEnv(env, { onLog } = {}) {
+function withGithubSshRewriteEnv(env, { onLog, githubMirror } = {}) {
   if (process.platform !== "win32") return env;
   const out = { ...(env || {}) };
+  const mirror = githubMirror ? String(githubMirror).trim() : "";
+  if (mirror) {
+    onLog?.(`已启用 GitHub 镜像：${mirror}（用于加速/绕过 GitHub 访问问题；仅本次安装进程生效）`);
+    out.GIT_CONFIG_COUNT = "3";
+    out.GIT_CONFIG_KEY_0 = `url.${mirror}.insteadOf`;
+    out.GIT_CONFIG_VALUE_0 = "ssh://git@github.com/";
+    out.GIT_CONFIG_KEY_1 = `url.${mirror}.insteadOf`;
+    out.GIT_CONFIG_VALUE_1 = "git@github.com:";
+    out.GIT_CONFIG_KEY_2 = `url.${mirror}.insteadOf`;
+    out.GIT_CONFIG_VALUE_2 = "https://github.com/";
+    return out;
+  }
+
   onLog?.("已启用 GitHub SSH -> HTTPS 重写（避免 git@github.com 权限问题；仅本次安装进程生效）");
   out.GIT_CONFIG_COUNT = "2";
   out.GIT_CONFIG_KEY_0 = "url.https://github.com/.insteadOf";
@@ -1022,7 +1051,7 @@ async function installOpenclaw({ env, signal, onLog, options, context: _context 
   onLog?.(`开始安装：npm install -g ${options.openclawPackage}`);
 
   if (process.platform === "win32") {
-    const installEnv = withGithubSshRewriteEnv(env, { onLog });
+    const installEnv = withGithubSshRewriteEnv(env, { onLog, githubMirror: options.githubMirror });
     await runWindowsShim({ baseCommand: "npm", args: ["install", "-g", options.openclawPackage], env: installEnv, signal, onLog });
 
     onLog?.("全局安装完成，尝试验证 openclaw 命令…");

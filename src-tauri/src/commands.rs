@@ -443,12 +443,112 @@ pub struct InstallOptions {
   pub openclaw_package: Option<String>,
   #[serde(rename = "npmRegistry")]
   pub npm_registry: Option<String>,
+  #[serde(rename = "githubMirror")]
+  pub github_mirror: Option<String>,
   #[serde(rename = "customBaseUrl")]
   pub custom_base_url: Option<String>,
   #[serde(rename = "customModelId")]
   pub custom_model_id: Option<String>,
   #[serde(rename = "customApiKey")]
   pub custom_api_key: Option<String>,
+}
+
+fn is_disable_keyword(value: &str) -> bool {
+  let lower = value.trim().to_ascii_lowercase();
+  matches!(lower.as_str(), "off" | "false" | "none" | "direct" | "disable" | "disabled" | "0")
+}
+
+fn validate_github_mirror(value: &str) -> Result<String, String> {
+  let trimmed = value.trim();
+  if trimmed.is_empty() {
+    return Err("GitHub mirror 不能为空".into());
+  }
+  if trimmed.chars().any(|c| c.is_whitespace()) {
+    return Err("GitHub mirror 不能包含空格".into());
+  }
+  if trimmed.contains('\'') || trimmed.contains('\"') || trimmed.contains('`') {
+    return Err("GitHub mirror 不合法".into());
+  }
+  if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+    return Err("GitHub mirror 必须以 http:// 或 https:// 开头".into());
+  }
+  let mut out = trimmed.to_string();
+  if !out.ends_with('/') {
+    out.push('/');
+  }
+  Ok(out)
+}
+
+fn run_logged_capture(window: &Window, cancel: &Arc<AtomicBool>, label: &str, cmd: Command) -> Result<(i32, String), String> {
+  check_canceled(cancel)?;
+  emit_log(window, "install-log", format!("{label} {}", format_command_for_log(&cmd)));
+
+  let captured = Arc::new(Mutex::new(String::new()));
+  let captured2 = captured.clone();
+
+  let w = window.clone();
+  let prefix = label.to_string();
+  let cancel2 = cancel.clone();
+  let code = spawn_with_streaming_logs_cancelable(cmd, cancel2, move |line| {
+    emit_log(&w, "install-log", format!("{prefix} {line}"));
+    if let Ok(mut buf) = captured2.lock() {
+      if buf.len() < 120_000 {
+        buf.push_str(&line);
+        buf.push('\n');
+      }
+    }
+  })?;
+
+  let text = captured.lock().map(|s| s.clone()).unwrap_or_default();
+  Ok((code, text))
+}
+
+fn output_looks_like_github_connectivity_issue(output: &str) -> bool {
+  let lower = output.to_ascii_lowercase();
+  if !lower.contains("github.com") {
+    return false;
+  }
+  let patterns = [
+    "failed to connect to github.com",
+    "could not connect to server",
+    "couldn't connect to server",
+    "could not resolve host: github.com",
+    "unable to access 'https://github.com",
+    "connection timed out",
+    "operation timed out",
+    "timed out",
+  ];
+  patterns.iter().any(|p| lower.contains(p))
+}
+
+fn apply_github_git_rewrite_env(window: &Window, cmd: &mut Command, github_mirror: Option<&str>) {
+  if let Some(mirror) = github_mirror {
+    emit_log(
+      window,
+      "install-log",
+      format!("已启用 GitHub 镜像：{mirror}（用于加速/绕过 GitHub 访问问题；仅本次安装生效）"),
+    );
+    cmd.env("GIT_CONFIG_COUNT", "3");
+    cmd.env("GIT_CONFIG_KEY_0", format!("url.{mirror}.insteadOf"));
+    cmd.env("GIT_CONFIG_VALUE_0", "ssh://git@github.com/");
+    cmd.env("GIT_CONFIG_KEY_1", format!("url.{mirror}.insteadOf"));
+    cmd.env("GIT_CONFIG_VALUE_1", "git@github.com:");
+    cmd.env("GIT_CONFIG_KEY_2", format!("url.{mirror}.insteadOf"));
+    cmd.env("GIT_CONFIG_VALUE_2", "https://github.com/");
+    return;
+  }
+
+  // Default: rewrite GitHub SSH URLs to HTTPS (avoid requiring SSH keys).
+  emit_log(
+    window,
+    "install-log",
+    "已启用 GitHub SSH -> HTTPS 重写（避免 git@github.com 权限问题；仅本次安装生效）",
+  );
+  cmd.env("GIT_CONFIG_COUNT", "2");
+  cmd.env("GIT_CONFIG_KEY_0", "url.https://github.com/.insteadOf");
+  cmd.env("GIT_CONFIG_VALUE_0", "ssh://git@github.com/");
+  cmd.env("GIT_CONFIG_KEY_1", "url.https://github.com/.insteadOf");
+  cmd.env("GIT_CONFIG_VALUE_1", "git@github.com:");
 }
 
 fn validate_npm_package_name(value: &str) -> Result<String, String> {
@@ -850,6 +950,7 @@ fn log_environment(window: &Window, cancel: &Arc<AtomicBool>, path_env: &str) {
 fn start_install_blocking(window: &Window, cancel: &Arc<AtomicBool>, options: InstallOptions) -> Result<(), String> {
   const MIN_NODE_MAJOR: u32 = 22;
   const DEFAULT_NPM_REGISTRY: &str = "https://registry.npmmirror.com";
+  const DEFAULT_GITHUB_MIRROR: &str = "https://gitclone.com/github.com/";
 
   let openclaw_package = validate_npm_package_name(options.openclaw_package.as_deref().unwrap_or("openclaw"))?;
   let npm_registry = options
@@ -858,6 +959,24 @@ fn start_install_blocking(window: &Window, cancel: &Arc<AtomicBool>, options: In
     .map(|v| v.trim().to_string())
     .filter(|v| !v.is_empty())
     .unwrap_or_else(|| DEFAULT_NPM_REGISTRY.to_string());
+  let github_mirror_user = options
+    .github_mirror
+    .as_deref()
+    .map(|v| v.trim())
+    .filter(|v| !v.is_empty());
+  let github_mirror_disabled = github_mirror_user.map(|v| is_disable_keyword(v)).unwrap_or(false);
+  let mut github_mirror = match github_mirror_user {
+    Some(v) if is_disable_keyword(v) => None,
+    Some(v) => Some(validate_github_mirror(v)?),
+    None => None,
+  };
+  #[cfg(target_os = "windows")]
+  {
+    if github_mirror.is_none() && !github_mirror_disabled {
+      github_mirror = Some(DEFAULT_GITHUB_MIRROR.to_string());
+    }
+  }
+
   #[allow(unused_mut)]
   let mut path_env = create_base_path_env();
 
@@ -871,6 +990,11 @@ fn start_install_blocking(window: &Window, cancel: &Arc<AtomicBool>, options: In
   emit_log(window, "install-log", format!("平台：{} / {}", std::env::consts::OS, std::env::consts::ARCH));
   emit_log(window, "install-log", format!("openclaw 包名：{openclaw_package}"));
   emit_log(window, "install-log", format!("npm registry: {npm_registry}"));
+  if let Some(mirror) = github_mirror.as_deref() {
+    emit_log(window, "install-log", format!("GitHub mirror: {mirror}"));
+  } else {
+    emit_log(window, "install-log", "GitHub mirror: (none)");
+  }
 
   log_environment(window, cancel, &path_env);
 
@@ -1014,31 +1138,46 @@ fn start_install_blocking(window: &Window, cancel: &Arc<AtomicBool>, options: In
 
   emit_progress(window, "openclaw", "全局安装 openclaw…", 4, total);
   check_canceled(cancel)?;
-  let mut npm_cmd = create_command(&path_env, "npm", &["install", "-g", &openclaw_package])?;
+  emit_log(window, "install-log", format!("[npm] registry: {npm_registry}"));
+  let npm_args = [
+    "install",
+    "-g",
+    openclaw_package.as_str(),
+    "--registry",
+    npm_registry.as_str(),
+  ];
+  let mut npm_cmd = create_command(&path_env, "npm", &npm_args)?;
   npm_cmd.env("npm_config_progress", "false");
   npm_cmd.env("npm_config_fund", "false");
   npm_cmd.env("npm_config_audit", "false");
-  #[cfg(target_os = "windows")]
-  {
-    // Workaround: some npm dependencies may use GitHub SSH URLs (e.g. ssh://git@github.com/...)
-    // which fails on machines without SSH keys. Rewrite to HTTPS for this install process only.
-    emit_log(
-      window,
-      "install-log",
-      "已启用 GitHub SSH -> HTTPS 重写（避免 git@github.com 权限问题；仅本次安装生效）",
-    );
-    npm_cmd.env("GIT_CONFIG_COUNT", "2");
-    npm_cmd.env("GIT_CONFIG_KEY_0", "url.https://github.com/.insteadOf");
-    npm_cmd.env("GIT_CONFIG_VALUE_0", "ssh://git@github.com/");
-    npm_cmd.env("GIT_CONFIG_KEY_1", "url.https://github.com/.insteadOf");
-    npm_cmd.env("GIT_CONFIG_VALUE_1", "git@github.com:");
-  }
-  // Use a user-provided registry if present; otherwise default to a China-friendly mirror
-  // to avoid slow global downloads. Applies only to this npm process.
-  npm_cmd.env("npm_config_registry", &npm_registry);
-  let code = run_logged(window, cancel, "[npm]", npm_cmd)?;
+  // Workaround: some npm dependencies may use GitHub SSH URLs (e.g. ssh://git@github.com/...)
+  // which fails on machines without SSH keys (and can be slow/blocked on some networks).
+  apply_github_git_rewrite_env(window, &mut npm_cmd, github_mirror.as_deref());
+  // Provide registry via CLI args for visibility and determinism.
+  let (code, output) = run_logged_capture(window, cancel, "[npm]", npm_cmd)?;
   if code != 0 {
-    return Err("npm install -g 失败，请查看日志。".into());
+    if output_looks_like_github_connectivity_issue(&output) && github_mirror.is_none() && !github_mirror_disabled {
+      emit_log(
+        window,
+        "install-log",
+        format!(
+          "[warn] 检测到 GitHub 连接失败，尝试启用 GitHub 镜像：{DEFAULT_GITHUB_MIRROR}（仅本次安装生效）"
+        ),
+      );
+      github_mirror = Some(DEFAULT_GITHUB_MIRROR.to_string());
+
+      let mut npm_cmd2 = create_command(&path_env, "npm", &npm_args)?;
+      npm_cmd2.env("npm_config_progress", "false");
+      npm_cmd2.env("npm_config_fund", "false");
+      npm_cmd2.env("npm_config_audit", "false");
+      apply_github_git_rewrite_env(window, &mut npm_cmd2, github_mirror.as_deref());
+      let (code2, _output2) = run_logged_capture(window, cancel, "[npm]", npm_cmd2)?;
+      if code2 != 0 {
+        return Err("npm install -g 失败，请查看日志。".into());
+      }
+    } else {
+      return Err("npm install -g 失败，请查看日志。".into());
+    }
   }
 
   emit_progress(window, "verify", "验证 openclaw 命令…", 5, total);
