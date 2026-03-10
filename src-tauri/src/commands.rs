@@ -234,6 +234,93 @@ fn windows_taskkill_tree_best_effort(pid: u32) {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_extract_port_from_url(url: &str) -> Option<u16> {
+  let trimmed = url.trim();
+  if trimmed.is_empty() {
+    return None;
+  }
+
+  let after_scheme = trimmed.split("://").nth(1).unwrap_or(trimmed);
+  let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
+  if host_port.is_empty() {
+    return None;
+  }
+
+  if host_port.starts_with('[') {
+    let end = host_port.find(']')?;
+    let rest = host_port.get(end + 1..)?;
+    let port_part = rest.strip_prefix(':')?;
+    return port_part.parse::<u16>().ok();
+  }
+
+  let (_host, port_part) = host_port.rsplit_once(':')?;
+  port_part.parse::<u16>().ok()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_gateway_status_text(resolved: &crate::openclaw::ResolvedOpenclaw) -> Option<String> {
+  let mut cmd = Command::new(&resolved.command);
+  apply_windows_no_window(&mut cmd);
+  cmd.env("PATH", &resolved.path_env);
+  cmd.args(["--no-color", "gateway", "status"]);
+  let out = cmd.output().ok()?;
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  let stderr = String::from_utf8_lossy(&out.stderr);
+  Some(format!("{stdout}\n{stderr}"))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_find_listening_pids_by_port(port: u16) -> Vec<u32> {
+  let script = format!(
+    r#"$ErrorActionPreference='SilentlyContinue'
+$port={port}
+$pids=@()
+if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {{
+  $pids = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
+    Where-Object {{ $_.State -eq 'Listen' -or $_.State -eq 2 }} |
+    Select-Object -ExpandProperty OwningProcess -Unique
+}}
+if (-not $pids -or $pids.Count -eq 0) {{
+  $lines = netstat -ano -p tcp | Select-String -Pattern (':'+$port+'\s+.*LISTENING\s+(\d+)$')
+  $pids = $lines | ForEach-Object {{
+    $m = [regex]::Match($_.Line, '\s+(\d+)\s*$')
+    if ($m.Success) {{ [int]$m.Groups[1].Value }}
+  }} | Select-Object -Unique
+}}
+$pids | ForEach-Object {{ [Console]::Out.WriteLine($_) }}
+"#
+  );
+
+  let mut cmd = Command::new("powershell");
+  apply_windows_no_window(&mut cmd);
+  cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script]);
+  let Ok(out) = cmd.output() else {
+    return vec![];
+  };
+
+  let combined = format!(
+    "{}\n{}",
+    String::from_utf8_lossy(&out.stdout),
+    String::from_utf8_lossy(&out.stderr)
+  );
+
+  let mut pids: Vec<u32> = Vec::new();
+  for line in combined.lines() {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+      continue;
+    }
+    if let Ok(pid) = trimmed.parse::<u32>() {
+      if pid > 0 && !pids.contains(&pid) {
+        pids.push(pid);
+      }
+    }
+  }
+
+  pids
+}
+
+#[cfg(target_os = "windows")]
 fn windows_gateway_start_direct(
   window: &Window,
   cancel: &Arc<AtomicBool>,
@@ -295,7 +382,10 @@ fn windows_gateway_start_direct(
 }
 
 #[cfg(target_os = "windows")]
-fn windows_gateway_stop_direct_best_effort(window: &Window) -> Result<bool, String> {
+fn windows_gateway_stop_direct_best_effort(
+  window: &Window,
+  resolved: &crate::openclaw::ResolvedOpenclaw,
+) -> Result<bool, String> {
   let state = windows_direct_gateway_child_state();
   let mut slot = state.lock().map_err(|_| "内部错误：锁失败")?;
   if let Some(mut child) = slot.take() {
@@ -311,7 +401,59 @@ fn windows_gateway_stop_direct_best_effort(window: &Window) -> Result<bool, Stri
 
   let Some(pid) = tracked_windows_direct_gateway_pid() else {
     clear_windows_direct_gateway_record();
-    return Ok(false);
+    let status_text = windows_gateway_status_text(resolved).unwrap_or_default();
+    let status = parse_gateway_status(&status_text);
+    let Some(dashboard_url) = status.dashboard_url.as_deref() else {
+      emit_log(
+        window,
+        "openclaw-log",
+        "[gateway] 未从 gateway status 解析到 Dashboard 端口，跳过端口强杀。",
+      );
+      return Ok(false);
+    };
+    let Some(port) = windows_extract_port_from_url(dashboard_url) else {
+      emit_log(
+        window,
+        "openclaw-log",
+        format!("[gateway] Dashboard 地址无法解析端口：{dashboard_url}"),
+      );
+      return Ok(false);
+    };
+
+    emit_log(
+      window,
+      "openclaw-log",
+      format!("[gateway] 未找到 tracked pid，尝试按端口强制停止（port={port}）…"),
+    );
+
+    let current_pid = std::process::id();
+    let mut pids = windows_find_listening_pids_by_port(port);
+    pids.retain(|candidate| *candidate != current_pid);
+
+    if pids.is_empty() {
+      emit_log(
+        window,
+        "openclaw-log",
+        format!("[gateway] 端口 {port} 未发现监听进程，停止完成。"),
+      );
+      return Ok(false);
+    }
+
+    for target_pid in &pids {
+      emit_log(
+        window,
+        "openclaw-log",
+        format!("[gateway] 停止端口 {port} 对应进程（pid={target_pid}）…"),
+      );
+      windows_taskkill_tree_best_effort(*target_pid);
+    }
+
+    emit_log(
+      window,
+      "openclaw-log",
+      format!("[gateway] 已按端口停止 {} 个进程（port={port}）。", pids.len()),
+    );
+    return Ok(true);
   };
 
   emit_log(window, "openclaw-log", format!("[gateway] 停止 direct 进程（pid={pid}）…"));
@@ -464,9 +606,14 @@ pub async fn run_openclaw(window: Window, state: tauri::State<'_, TaskState>, ar
 
       let is_gateway_stop = args.len() == 2 && args[0] == "gateway" && args[1] == "stop";
       if is_gateway_stop {
-        if windows_gateway_stop_direct_best_effort(&w2)? {
-          return Ok(());
+        if !windows_gateway_stop_direct_best_effort(&w2, &resolved)? {
+          emit_log(
+            &w2,
+            "openclaw-log",
+            "[gateway] 未发现可停止的网关监听进程（已跳过 Scheduled Task 停止）。",
+          );
         }
+        return Ok(());
       }
     }
 
