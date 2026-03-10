@@ -1,6 +1,6 @@
 use crate::openclaw::{
   cleanup_all_mac_nvm_openclaw, cleanup_mac_nvm_openclaw, create_base_path_env, get_openclaw_info, parse_gateway_status,
-  resolve_command_in_path, resolve_openclaw, spawn_with_streaming_logs_cancelable, GatewayStatus, OpenclawInfo,
+  apply_windows_no_window, resolve_command_in_path, resolve_openclaw, spawn_with_streaming_logs_cancelable, GatewayStatus, OpenclawInfo,
 };
 use serde::Deserialize;
 use serde::Serialize;
@@ -112,6 +112,7 @@ pub async fn get_gateway_status() -> GatewayStatus {
   };
 
   let mut cmd = Command::new(&resolved.command);
+  apply_windows_no_window(&mut cmd);
   cmd.env("PATH", &resolved.path_env);
   cmd.args(["--no-color", "gateway", "status"]);
   match cmd.output() {
@@ -161,6 +162,7 @@ pub async fn open_dashboard(_app: AppHandle) -> Result<String, String> {
   let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
 
   let mut cmd = Command::new(&resolved.command);
+  apply_windows_no_window(&mut cmd);
   cmd.env("PATH", &resolved.path_env);
   cmd.args(["dashboard", "--no-open"]);
   let output = cmd.output().map_err(|e| e.to_string())?;
@@ -496,6 +498,7 @@ fn resolve_program(path_env: &str, program: &str) -> Result<PathBuf, String> {
 fn create_command(path_env: &str, program: &str, args: &[&str]) -> Result<Command, String> {
   let resolved = resolve_program(path_env, program)?;
   let mut cmd = Command::new(resolved);
+  apply_windows_no_window(&mut cmd);
   cmd.env("PATH", path_env);
   cmd.args(args);
   Ok(cmd)
@@ -600,6 +603,7 @@ fn run_openclaw_collect(
   args: &[&str],
 ) -> Result<String, String> {
   let mut cmd = Command::new(&resolved.command);
+  apply_windows_no_window(&mut cmd);
   cmd.env("PATH", &resolved.path_env);
   cmd.args(args);
   let out = cmd.output().map_err(|e| e.to_string())?;
@@ -807,6 +811,7 @@ fn log_environment(window: &Window, cancel: &Arc<AtomicBool>, path_env: &str) {
         format!("openclaw resolved: (found) ({})", resolved.source),
       );
       let mut cmd = Command::new(&resolved.command);
+      apply_windows_no_window(&mut cmd);
       cmd.env("PATH", &resolved.path_env);
       cmd.arg("--version");
       let out = cmd.output().ok().map(|o| {

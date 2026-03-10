@@ -10,6 +10,20 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
+pub fn apply_windows_no_window(cmd: &mut Command) {
+  #[cfg(target_os = "windows")]
+  {
+    use std::os::windows::process::CommandExt;
+    // WinAPI constant: CREATE_NO_WINDOW
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+  }
+  #[cfg(not(target_os = "windows"))]
+  {
+    let _ = cmd;
+  }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedOpenclaw {
   pub command: PathBuf,
@@ -108,10 +122,9 @@ fn parse_reg_query_value(output: &str) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn get_windows_registry_path_value(hive: &str) -> Option<String> {
-  let output = Command::new("reg")
-    .args(["query", hive, "/v", "Path"])
-    .output()
-    .ok()?;
+  let mut cmd = Command::new("reg");
+  apply_windows_no_window(&mut cmd);
+  let output = cmd.args(["query", hive, "/v", "Path"]).output().ok()?;
   let combined = format!(
     "{}\n{}",
     String::from_utf8_lossy(&output.stdout),
@@ -302,6 +315,7 @@ fn compare_semver(a: (u32, u32, u32), b: (u32, u32, u32)) -> Ordering {
 }
 
 fn run_collect(mut cmd: Command) -> Result<(i32, String, String), String> {
+  apply_windows_no_window(&mut cmd);
   let out = cmd.output().map_err(|e| e.to_string())?;
   let code = out.status.code().unwrap_or(-1);
   let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -626,6 +640,7 @@ pub fn spawn_with_streaming_logs(
   mut on_line: impl FnMut(String) + Send + 'static,
 ) -> Result<i32, String> {
   cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+  apply_windows_no_window(&mut cmd);
   let mut child = cmd.spawn().map_err(|e| e.to_string())?;
   let stdout = child.stdout.take().ok_or("stdout unavailable")?;
   let stderr = child.stderr.take().ok_or("stderr unavailable")?;
@@ -694,6 +709,7 @@ pub fn spawn_with_streaming_logs_cancelable(
   mut on_line: impl FnMut(String) + Send + 'static,
 ) -> Result<i32, String> {
   cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+  apply_windows_no_window(&mut cmd);
   let mut child = cmd.spawn().map_err(|e| e.to_string())?;
   let stdout = child.stdout.take().ok_or("stdout unavailable")?;
   let stderr = child.stderr.take().ok_or("stderr unavailable")?;
