@@ -53,60 +53,178 @@ fn split_lines(text: &str) -> Vec<String> {
     .collect()
 }
 
+fn path_separator() -> char {
+  if cfg!(target_os = "windows") {
+    ';'
+  } else {
+    ':'
+  }
+}
+
+#[cfg(target_os = "windows")]
+fn expand_windows_env_vars(value: &str) -> String {
+  let chars: Vec<char> = value.chars().collect();
+  let mut out = String::with_capacity(value.len());
+  let mut index = 0usize;
+
+  while index < chars.len() {
+    if chars[index] == '%' {
+      if let Some(end_rel) = chars[index + 1..].iter().position(|c| *c == '%') {
+        let end = index + 1 + end_rel;
+        let name: String = chars[index + 1..end].iter().collect();
+        if !name.trim().is_empty() {
+          if let Ok(expanded) = env::var(name.trim()) {
+            out.push_str(expanded.trim());
+            index = end + 1;
+            continue;
+          }
+        }
+      }
+    }
+
+    out.push(chars[index]);
+    index += 1;
+  }
+
+  out
+}
+
+#[cfg(target_os = "windows")]
+fn parse_reg_query_value(output: &str) -> Option<String> {
+  for line in split_lines(output) {
+    let Some(type_index) = line.find("REG_") else {
+      continue;
+    };
+    let type_and_value = &line[type_index..];
+    let mut parts = type_and_value.splitn(2, char::is_whitespace);
+    let _value_type = parts.next()?;
+    let value = parts.next()?.trim();
+    if !value.is_empty() {
+      return Some(value.to_string());
+    }
+  }
+  None
+}
+
+#[cfg(target_os = "windows")]
+fn get_windows_registry_path_value(hive: &str) -> Option<String> {
+  let output = Command::new("reg")
+    .args(["query", hive, "/v", "Path"])
+    .output()
+    .ok()?;
+  let combined = format!(
+    "{}\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  parse_reg_query_value(&combined)
+}
+
 fn merge_path_entries(existing_path: Option<&str>, extra_entries: &[&str], extra_first: bool) -> String {
   let existing = existing_path.unwrap_or("");
+  let separator = path_separator();
   let mut seen = HashSet::<String>::new();
   let mut entries: Vec<String> = Vec::new();
 
   let mut push = |value: &str| {
-    let trimmed = value.trim();
+    #[cfg(target_os = "windows")]
+    let normalized = expand_windows_env_vars(value);
+    #[cfg(not(target_os = "windows"))]
+    let normalized = value.to_string();
+
+    let trimmed = normalized.trim();
     if trimmed.is_empty() {
       return;
     }
+    #[cfg(target_os = "windows")]
+    let key = trimmed.to_ascii_lowercase();
+    #[cfg(not(target_os = "windows"))]
     let key = trimmed.to_string();
+
     if seen.contains(&key) {
       return;
     }
     seen.insert(key.clone());
-    entries.push(key);
+    entries.push(trimmed.to_string());
   };
 
   if extra_first {
     for e in extra_entries {
-      push(e);
+      for part in e.split(separator) {
+        push(part);
+      }
     }
-    for e in existing.split(':') {
+    for e in existing.split(separator) {
       push(e);
     }
   } else {
-    for e in existing.split(':') {
+    for e in existing.split(separator) {
       push(e);
     }
     for e in extra_entries {
-      push(e);
+      for part in e.split(separator) {
+        push(part);
+      }
     }
   }
 
-  entries.join(":")
+  entries.join(&separator.to_string())
 }
 
 pub fn create_base_path_env() -> String {
   let existing = env::var("PATH").ok();
-  let local_bin = home_dir().map(|h| h.join(".local").join("bin").to_string_lossy().to_string());
 
-  let mut extra: Vec<String> = vec![
-    "/opt/homebrew/bin".into(),
-    "/usr/local/bin".into(),
-    "/usr/bin".into(),
-    "/bin".into(),
-    "/usr/sbin".into(),
-    "/sbin".into(),
-  ];
-  if let Some(local) = local_bin {
-    extra.insert(2, local);
+  #[cfg(target_os = "windows")]
+  {
+    let mut extra: Vec<String> = Vec::new();
+
+    if let Some(user_path) = get_windows_registry_path_value("HKCU\\Environment") {
+      extra.push(user_path);
+    }
+    if let Some(machine_path) = get_windows_registry_path_value(
+      "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
+    ) {
+      extra.push(machine_path);
+    }
+
+    if let Some(home) = home_dir() {
+      extra.push(home.join("AppData").join("Roaming").join("npm").to_string_lossy().to_string());
+      extra.push(home.join("AppData").join("Local").join("nvm").to_string_lossy().to_string());
+    }
+
+    if let Ok(nvm_home) = env::var("NVM_HOME") {
+      extra.push(nvm_home);
+    }
+    if let Ok(nvm_symlink) = env::var("NVM_SYMLINK") {
+      extra.push(nvm_symlink);
+    }
+
+    extra.push("C:\\Program Files\\Git\\cmd".into());
+    extra.push("C:\\Program Files\\nodejs".into());
+    extra.push("C:\\nvm4w\\nodejs".into());
+
+    let extra_refs: Vec<&str> = extra.iter().map(|s| s.as_str()).collect();
+    return merge_path_entries(existing.as_deref(), &extra_refs, false);
   }
-  let extra_refs: Vec<&str> = extra.iter().map(|s| s.as_str()).collect();
-  merge_path_entries(existing.as_deref(), &extra_refs, true)
+
+  #[cfg(not(target_os = "windows"))]
+  {
+    let local_bin = home_dir().map(|h| h.join(".local").join("bin").to_string_lossy().to_string());
+
+    let mut extra: Vec<String> = vec![
+      "/opt/homebrew/bin".into(),
+      "/usr/local/bin".into(),
+      "/usr/bin".into(),
+      "/bin".into(),
+      "/usr/sbin".into(),
+      "/sbin".into(),
+    ];
+    if let Some(local) = local_bin {
+      extra.insert(2, local);
+    }
+    let extra_refs: Vec<&str> = extra.iter().map(|s| s.as_str()).collect();
+    merge_path_entries(existing.as_deref(), &extra_refs, true)
+  }
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -123,17 +241,51 @@ fn is_executable(path: &Path) -> bool {
   true
 }
 
-fn which_in_path(command: &str, path_env: &str) -> Option<PathBuf> {
-  for dir in path_env.split(':') {
+#[cfg(target_os = "windows")]
+fn windows_command_candidates(command: &str) -> Vec<String> {
+  if Path::new(command).extension().is_some() {
+    return vec![command.to_string()];
+  }
+
+  vec![
+    format!("{command}.cmd"),
+    format!("{command}.exe"),
+    format!("{command}.bat"),
+    format!("{command}.com"),
+    command.to_string(),
+  ]
+}
+
+pub fn resolve_command_in_path(command: &str, path_env: &str) -> Option<PathBuf> {
+  let separator = path_separator();
+  for dir in path_env.split(separator) {
     if dir.trim().is_empty() {
       continue;
     }
-    let candidate = Path::new(dir).join(command);
-    if is_executable(&candidate) {
-      return Some(candidate);
+
+    #[cfg(target_os = "windows")]
+    {
+      for candidate_name in windows_command_candidates(command) {
+        let candidate = Path::new(dir).join(&candidate_name);
+        if is_executable(&candidate) {
+          return Some(candidate);
+        }
+      }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+      let candidate = Path::new(dir).join(command);
+      if is_executable(&candidate) {
+        return Some(candidate);
+      }
     }
   }
   None
+}
+
+fn which_in_path(command: &str, path_env: &str) -> Option<PathBuf> {
+  resolve_command_in_path(command, path_env)
 }
 
 fn parse_semver_tuple(version: &str) -> Option<(u32, u32, u32)> {
@@ -179,16 +331,33 @@ pub fn resolve_openclaw() -> Option<ResolvedOpenclaw> {
 
   // 3) npm prefix -g
   {
-    let mut cmd = Command::new("npm");
+    let npm_program = resolve_command_in_path("npm", &path_env).unwrap_or_else(|| PathBuf::from("npm"));
+    let mut cmd = Command::new(&npm_program);
     cmd.env("PATH", &path_env);
     cmd.args(["prefix", "-g"]);
     if let Ok((_code, stdout, stderr)) = run_collect(cmd) {
       let combined = format!("{stdout}\n{stderr}");
       let prefix = split_lines(&combined).into_iter().next();
       if let Some(prefix) = prefix {
-        let candidate = Path::new(&prefix).join("bin").join("openclaw");
-        if is_executable(&candidate) {
-          return Some(ResolvedOpenclaw { command: candidate, source: "npm_prefix", path_env });
+        #[cfg(target_os = "windows")]
+        {
+          let candidates = [
+            Path::new(&prefix).join("openclaw.cmd"),
+            Path::new(&prefix).join("openclaw"),
+          ];
+          for candidate in candidates {
+            if is_executable(&candidate) {
+              return Some(ResolvedOpenclaw { command: candidate, source: "npm_prefix", path_env });
+            }
+          }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+          let candidate = Path::new(&prefix).join("bin").join("openclaw");
+          if is_executable(&candidate) {
+            return Some(ResolvedOpenclaw { command: candidate, source: "npm_prefix", path_env });
+          }
         }
       }
     }

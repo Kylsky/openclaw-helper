@@ -1,6 +1,6 @@
 use crate::openclaw::{
-  cleanup_all_mac_nvm_openclaw, cleanup_mac_nvm_openclaw, get_openclaw_info, parse_gateway_status, resolve_openclaw,
-  spawn_with_streaming_logs_cancelable, GatewayStatus, OpenclawInfo,
+  cleanup_all_mac_nvm_openclaw, cleanup_mac_nvm_openclaw, create_base_path_env, get_openclaw_info, parse_gateway_status,
+  resolve_command_in_path, resolve_openclaw, spawn_with_streaming_logs_cancelable, GatewayStatus, OpenclawInfo,
 };
 use serde::Deserialize;
 use serde::Serialize;
@@ -374,19 +374,29 @@ fn find_brew(path_env: &str) -> Option<String> {
     }
   }
 
-  let ok = Command::new("brew")
-    .env("PATH", path_env)
-    .arg("--version")
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null())
-    .status()
-    .map(|s| s.success())
-    .unwrap_or(false);
+  let ok = command_output(path_env, "brew", &["--version"]).is_ok();
   if ok {
     Some("brew".into())
   } else {
     None
   }
+}
+
+fn resolve_program(path_env: &str, program: &str) -> Result<PathBuf, String> {
+  let program_path = Path::new(program);
+  if program_path.is_absolute() || program.contains(std::path::MAIN_SEPARATOR) {
+    return Ok(program_path.to_path_buf());
+  }
+
+  resolve_command_in_path(program, path_env).ok_or_else(|| "program not found".to_string())
+}
+
+fn create_command(path_env: &str, program: &str, args: &[&str]) -> Result<Command, String> {
+  let resolved = resolve_program(path_env, program)?;
+  let mut cmd = Command::new(resolved);
+  cmd.env("PATH", path_env);
+  cmd.args(args);
+  Ok(cmd)
 }
 
 fn run_logged(window: &Window, cancel: &Arc<AtomicBool>, label: &str, cmd: Command) -> Result<i32, String> {
@@ -396,6 +406,19 @@ fn run_logged(window: &Window, cancel: &Arc<AtomicBool>, label: &str, cmd: Comma
   let prefix = label.to_string();
   let cancel2 = cancel.clone();
   spawn_with_streaming_logs_cancelable(cmd, cancel2, move |line| emit_log(&w, "install-log", format!("{prefix} {line}")))
+}
+
+#[cfg(target_os = "windows")]
+fn run_logged_program(
+  window: &Window,
+  cancel: &Arc<AtomicBool>,
+  label: &str,
+  path_env: &str,
+  program: &str,
+  args: &[&str],
+) -> Result<i32, String> {
+  let cmd = create_command(path_env, program, args)?;
+  run_logged(window, cancel, label, cmd)
 }
 
 fn format_command_for_log(cmd: &Command) -> String {
@@ -413,15 +436,22 @@ fn format_command_for_log(cmd: &Command) -> String {
 }
 
 fn command_output(path_env: &str, program: &str, args: &[&str]) -> Result<String, String> {
-  let mut cmd = Command::new(program);
-  cmd.env("PATH", path_env);
-  cmd.args(args);
+  let mut cmd = create_command(path_env, program, args)?;
   let out = cmd.output().map_err(|e| e.to_string())?;
   Ok(format!(
     "{}\n{}",
     String::from_utf8_lossy(&out.stdout),
     String::from_utf8_lossy(&out.stderr)
   ))
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_winget(path_env: &str) -> Result<(), String> {
+  if command_output(path_env, "winget", &["--version"]).is_ok() {
+    Ok(())
+  } else {
+    Err("未检测到 winget。请先安装 Microsoft App Installer（Windows 软件包管理器）后重试。".into())
+  }
 }
 
 fn redact_sensitive_args(args: &[String]) -> String {
@@ -687,7 +717,8 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
   let cancel = state.start()?;
   let result = (|| -> Result<(), String> {
     let openclaw_package = validate_npm_package_name(options.openclaw_package.as_deref().unwrap_or("openclaw"))?;
-    let path_env = crate::openclaw::create_base_path_env();
+    #[allow(unused_mut)]
+    let mut path_env = create_base_path_env();
 
     let needs_onboard = options
       .custom_api_key
@@ -718,6 +749,30 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
           let _ = run_logged(&window, &cancel, "[brew]", cmd)?;
         }
       }
+      #[cfg(target_os = "windows")]
+      {
+        ensure_winget(&path_env)?;
+        emit_log(&window, "install-log", "未检测到 Git，尝试通过 winget 安装 Git…");
+        let code = run_logged_program(
+          &window,
+          &cancel,
+          "[winget]",
+          &path_env,
+          "winget",
+          &[
+            "install",
+            "-e",
+            "--id",
+            "Git.Git",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+          ],
+        )?;
+        if code != 0 {
+          return Err(format!("winget 安装 Git 失败（退出码 {code}）"));
+        }
+        path_env = create_base_path_env();
+      }
       let git_ok2 = command_output(&path_env, "git", &["--version"]).is_ok();
       if !git_ok2 {
         return Err("未检测到 git。请先安装 git（推荐：Homebrew 安装 git，或安装 Xcode Command Line Tools）。".into());
@@ -727,7 +782,8 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
     emit_progress(&window, "node", "检测 Node.js…", 3, total);
     let node_version_out = command_output(&path_env, "node", &["-v"]).ok();
     let node_major = node_version_out.as_deref().and_then(parse_node_major);
-    let need_node = node_major.map(|m| m < MIN_NODE_MAJOR).unwrap_or(true);
+    let npm_ok = command_output(&path_env, "npm", &["-v"]).is_ok();
+    let need_node = node_major.map(|m| m < MIN_NODE_MAJOR).unwrap_or(true) || !npm_ok;
     if need_node {
       #[cfg(target_os = "macos")]
       {
@@ -737,7 +793,63 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
         cmd.args(["install", "node"]);
         let _ = run_logged(&window, &cancel, "[brew]", cmd)?;
       }
-      #[cfg(not(target_os = "macos"))]
+      #[cfg(target_os = "windows")]
+      {
+        ensure_winget(&path_env)?;
+        emit_log(&window, "install-log", "Node.js / npm 不满足要求，尝试通过 winget 修复…");
+
+        let upgrade_code = run_logged_program(
+          &window,
+          &cancel,
+          "[winget]",
+          &path_env,
+          "winget",
+          &[
+            "upgrade",
+            "-e",
+            "--id",
+            "OpenJS.NodeJS.LTS",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+          ],
+        )?;
+        if upgrade_code != 0 {
+          emit_log(
+            &window,
+            "install-log",
+            format!("[winget] upgrade 返回退出码 {upgrade_code}，继续检查是否需要 install…"),
+          );
+        }
+
+        path_env = create_base_path_env();
+        let node_after_upgrade = command_output(&path_env, "node", &["-v"]).ok();
+        let node_major_after_upgrade = node_after_upgrade.as_deref().and_then(parse_node_major);
+        let npm_after_upgrade = command_output(&path_env, "npm", &["-v"]).is_ok();
+        let still_need_install = node_major_after_upgrade.map(|m| m < MIN_NODE_MAJOR).unwrap_or(true) || !npm_after_upgrade;
+
+        if still_need_install {
+          let install_code = run_logged_program(
+            &window,
+            &cancel,
+            "[winget]",
+            &path_env,
+            "winget",
+            &[
+              "install",
+              "-e",
+              "--id",
+              "OpenJS.NodeJS.LTS",
+              "--accept-package-agreements",
+              "--accept-source-agreements",
+            ],
+          )?;
+          if install_code != 0 {
+            return Err(format!("winget 安装 Node.js 失败（退出码 {install_code}）"));
+          }
+          path_env = create_base_path_env();
+        }
+      }
+      #[cfg(not(any(target_os = "macos", target_os = "windows")))]
       {
         return Err(format!(
           "未检测到可用 Node.js（需要 >= {MIN_NODE_MAJOR}）。请先安装 Node.js 后重试。"
@@ -752,22 +864,20 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
     }
 
     // Ensure npm exists (some Node installations might be incomplete).
-    let npm_ok = command_output(&path_env, "npm", &["-v"]).is_ok();
-    if !npm_ok {
+    let npm_ok_final = command_output(&path_env, "npm", &["-v"]).is_ok();
+    if !npm_ok_final {
       return Err("未检测到 npm。请确认 Node.js 安装完整，或重新安装 Node.js 后重试。".into());
     }
 
     emit_progress(&window, "openclaw", "全局安装 openclaw…", 4, total);
     check_canceled(&cancel)?;
-    let mut npm_cmd = Command::new("npm");
-    npm_cmd.env("PATH", &path_env);
+    let mut npm_cmd = create_command(&path_env, "npm", &["install", "-g", &openclaw_package])?;
     npm_cmd.env("npm_config_progress", "false");
     npm_cmd.env("npm_config_fund", "false");
     npm_cmd.env("npm_config_audit", "false");
     if let Some(reg) = options.npm_registry.as_ref() {
       npm_cmd.env("npm_config_registry", reg);
     }
-    npm_cmd.args(["install", "-g", &openclaw_package]);
     let code = run_logged(&window, &cancel, "[npm]", npm_cmd)?;
     if code != 0 {
       return Err("npm install -g 失败，请查看日志。".into());
