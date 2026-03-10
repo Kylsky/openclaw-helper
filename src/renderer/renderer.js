@@ -275,6 +275,42 @@ async function runOpenclaw(args, { stageLabel }) {
   }
 }
 
+async function runOpenclawSequence(steps, { stageLabel }) {
+  if (taskRunning) return false;
+  const list = Array.isArray(steps) ? steps.filter(Boolean) : [];
+  if (list.length === 0) return false;
+
+  setTaskRunning(true);
+  logEl.textContent = "";
+  setStage(stageLabel || "执行中…");
+  setProgress(0.05);
+
+  try {
+    for (let i = 0; i < list.length; i += 1) {
+      const step = list[i] || {};
+      const args = Array.isArray(step.args) ? step.args : [];
+      const title = step.stageLabel || stageLabel || "执行中…";
+      setStage(title);
+      setProgress(Math.min(0.95, 0.1 + i / Math.max(1, list.length) * 0.8));
+      await installer.runOpenclaw(args);
+    }
+    setStage("完成");
+    setProgress(1);
+    return true;
+  } catch (error) {
+    const message = error?.message || String(error);
+    setStage("失败");
+    appendLog(`[错误] ${message}`);
+    showLogsCheckbox.checked = true;
+    updateLogVisibility();
+    await rerouteIfOpenclawMissing(error);
+    return false;
+  } finally {
+    setTaskRunning(false);
+    await checkAndRoute();
+  }
+}
+
 showLogsCheckbox.addEventListener("change", () => updateLogVisibility());
 
 const requestCancelTask = async () => {
@@ -349,15 +385,19 @@ openDashboardBtn.addEventListener("click", async () => {
 gatewayStartBtn.addEventListener("click", async () => {
   // If the service wasn't installed (or got removed), installing on-demand keeps
   // the UI simpler while still being resilient.
+  const steps = [];
   try {
     const status = await installer.getGatewayStatus();
-    if (status?.state === "not_installed") {
-      await runOpenclaw(["gateway", "install"], { stageLabel: "安装网关服务…" });
+    const raw = String(status?.raw || "");
+    const looksMissing = /scheduled task\s*\(missing\)|gateway service missing|service missing/i.test(raw);
+    if (status?.state === "not_installed" || looksMissing) {
+      steps.push({ args: ["gateway", "install"], stageLabel: "安装网关服务…" });
     }
   } catch {
     // ignore and let start attempt run
   }
-  await runOpenclaw(["gateway", "start"], { stageLabel: "启动网关服务…" });
+  steps.push({ args: ["gateway", "start"], stageLabel: "启动网关服务…" });
+  await runOpenclawSequence(steps, { stageLabel: "启动网关服务…" });
   await refreshGatewayStatus();
 });
 
