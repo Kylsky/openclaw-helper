@@ -646,6 +646,12 @@ fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), Strin
 
 fn expand_user_path(raw: &str) -> PathBuf {
   let trimmed = raw.trim();
+  if trimmed.is_empty() {
+    return PathBuf::new();
+  }
+
+  let trimmed = trimmed.trim_matches(|c| c == '"' || c == '\'');
+
   if trimmed == "~" {
     if let Some(home) = crate::openclaw::home_dir() {
       return home;
@@ -653,6 +659,12 @@ fn expand_user_path(raw: &str) -> PathBuf {
   }
 
   if let Some(rest) = trimmed.strip_prefix("~/") {
+    if let Some(home) = crate::openclaw::home_dir() {
+      return home.join(rest);
+    };
+  }
+
+  if let Some(rest) = trimmed.strip_prefix("~\\") {
     if let Some(home) = crate::openclaw::home_dir() {
       return home.join(rest);
     };
@@ -1094,7 +1106,20 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
         emit_log(&w2, "install-log", format!("[openclaw] {line}"));
       })?;
       if code2 != 0 {
-        return Err(format!("网关重启失败（退出码 {code2}）。你可以手动运行：openclaw gateway restart"));
+        #[cfg(target_os = "windows")]
+        {
+          emit_log(
+            &window,
+            "install-log",
+            format!(
+              "[warn] 网关重启失败（退出码 {code2}）。Windows 上安装/启动网关服务可能需要管理员权限。\n你可以稍后在管理员 PowerShell 运行：openclaw gateway install && openclaw gateway start"
+            ),
+          );
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+          return Err(format!("网关重启失败（退出码 {code2}）。你可以手动运行：openclaw gateway restart"));
+        }
       }
     } else {
       emit_log(&window, "install-log", "跳过自动配置：未提供 CUSTOM_API_KEY。");
