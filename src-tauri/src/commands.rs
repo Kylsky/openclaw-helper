@@ -95,13 +95,15 @@ fn run_openclaw_elevated(
     format!(
       "$ErrorActionPreference='Stop';\n\
        $command='{cmdline}';\n\
-       $p=Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/s','/c',$command) -Verb RunAs -PassThru -Wait -WindowStyle Hidden;\n\
+       # Show a visible window for elevated install steps (UAC-required), so users can see progress/errors.\n\
+       $p=Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/s','/c',$command) -Verb RunAs -PassThru -Wait -WindowStyle Normal;\n\
        exit $p.ExitCode\n"
     )
   } else {
     format!(
       "$ErrorActionPreference='Stop';\n\
-       $p=Start-Process -FilePath '{openclaw_path_escaped}' -ArgumentList @({arg_list_ps}) -Verb RunAs -PassThru -Wait -WindowStyle Hidden;\n\
+       # Show a visible window for elevated install steps (UAC-required), so users can see progress/errors.\n\
+       $p=Start-Process -FilePath '{openclaw_path_escaped}' -ArgumentList @({arg_list_ps}) -Verb RunAs -PassThru -Wait -WindowStyle Normal;\n\
        exit $p.ExitCode\n"
     )
   };
@@ -327,7 +329,7 @@ pub async fn run_openclaw(window: Window, state: tauri::State<'_, TaskState>, ar
         emit_log(
           &w2,
           "openclaw-log",
-          "[tip] 安装网关服务需要管理员权限，将弹出 UAC 授权窗口（点“是”继续）。",
+          "[tip] 安装网关服务需要管理员权限，将弹出 UAC 授权窗口，并打开管理员终端窗口执行安装（这是 Windows 限制）。",
         );
         let code = run_openclaw_elevated(&w2, &cancel2, &resolved, &["--no-color", "gateway", "install"])?;
         if code == 0 {
