@@ -1263,7 +1263,7 @@ fn start_install_blocking(window: &Window, cancel: &Arc<AtomicBool>, options: In
     .as_deref()
     .map(|v| !v.trim().is_empty())
     .unwrap_or(false);
-  let total = if needs_onboard { 8u32 } else { 5u32 };
+  let total = if needs_onboard { 7u32 } else { 5u32 };
   emit_progress(window, "prepare", "准备环境…", 1, total);
   emit_log(window, "install-log", format!("平台：{} / {}", std::env::consts::OS, std::env::consts::ARCH));
   emit_log(window, "install-log", format!("openclaw 包名：{openclaw_package}"));
@@ -1568,33 +1568,7 @@ fn start_install_blocking(window: &Window, cancel: &Arc<AtomicBool>, options: In
 
     emit_progress(window, "config", "写入 openai-responses 配置…", 7, total);
     set_openai_api_mode_openai_responses(window, cancel, &resolved)?;
-
-    emit_progress(window, "gateway", "重启网关服务…", 8, total);
-    check_canceled(cancel)?;
-    let mut restart = Command::new(&resolved.command);
-    apply_windows_no_window(&mut restart);
-    restart.env("PATH", &resolved.path_env);
-    restart.args(["gateway", "restart"]);
-    let w2 = window.clone();
-    let code2 = spawn_with_streaming_logs_cancelable(restart, cancel.clone(), move |line| {
-      emit_log(&w2, "install-log", format!("[openclaw] {line}"));
-    })?;
-    if code2 != 0 {
-      #[cfg(target_os = "windows")]
-      {
-        emit_log(
-          window,
-          "install-log",
-          format!(
-            "[warn] 网关重启失败（退出码 {code2}）。Windows 上安装/启动网关服务可能需要管理员权限。\n你可以稍后在管理员 PowerShell 运行：openclaw gateway install && openclaw gateway start"
-          ),
-        );
-      }
-      #[cfg(not(target_os = "windows"))]
-      {
-        return Err(format!("网关重启失败（退出码 {code2}）。你可以手动运行：openclaw gateway restart"));
-      }
-    }
+    emit_log(window, "install-log", "安装完成：未自动重启网关服务，你可以稍后手动启动。");
   } else {
     emit_log(window, "install-log", "跳过自动配置：未提供 CUSTOM_API_KEY。");
   }
