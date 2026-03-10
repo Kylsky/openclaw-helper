@@ -249,19 +249,40 @@ pub async fn uninstall_openclaw(window: Window, state: tauri::State<'_, TaskStat
   let cancel2 = cancel.clone();
 
   let join = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-    let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
-    let openclaw_cmd = resolved.command.clone();
+    let resolved = resolve_openclaw();
+    let path_env = resolved
+      .as_ref()
+      .map(|r| r.path_env.clone())
+      .unwrap_or_else(create_base_path_env);
+    let openclaw_cmd = resolved.as_ref().map(|r| r.command.clone());
 
     emit_log(&w2, "install-log", "[uninstall] start");
-    emit_log(
-      &w2,
-      "install-log",
-      "openclaw uninstall --service --state --workspace --yes --non-interactive",
-    );
+    if let Some(resolved) = resolved.as_ref() {
+      emit_log(
+        &w2,
+        "install-log",
+        format!(
+          "[uninstall] openclaw resolved: {} ({})",
+          resolved.command.to_string_lossy(),
+          resolved.source
+        ),
+      );
+      emit_log(
+        &w2,
+        "install-log",
+        "openclaw uninstall --service --state --workspace --yes --non-interactive",
+      );
+    } else {
+      emit_log(
+        &w2,
+        "install-log",
+        "[warn] 未检测到 openclaw 命令，跳过 openclaw uninstall，直接尝试清理…",
+      );
+    }
 
     // 1) OpenClaw's own uninstaller (service/state/workspace).
-    {
-      let mut cmd = Command::new(&openclaw_cmd);
+    if let Some(resolved) = resolved.as_ref() {
+      let mut cmd = Command::new(&resolved.command);
       apply_windows_no_window(&mut cmd);
       cmd.env("PATH", &resolved.path_env);
       cmd.args([
@@ -275,7 +296,15 @@ pub async fn uninstall_openclaw(window: Window, state: tauri::State<'_, TaskStat
       let w = w2.clone();
       let code = spawn_with_streaming_logs_cancelable(cmd, cancel2.clone(), move |line| emit_log(&w, "install-log", line))?;
       if code != 0 {
-        return Err(format!("openclaw uninstall 失败（退出码 {code}）"));
+        // If the CLI is partially broken (common when npm shims remain but module files are gone),
+        // continue with manual cleanup so the user can still recover.
+        emit_log(
+          &w2,
+          "install-log",
+          format!(
+            "[warn] openclaw uninstall 失败（退出码 {code}），将继续尝试通过 npm/pnpm 等方式清理…"
+          ),
+        );
       }
     }
 
@@ -289,7 +318,7 @@ pub async fn uninstall_openclaw(window: Window, state: tauri::State<'_, TaskStat
 
     let run_best_effort = |label: &str, program: &str, args: &[&str]| {
       check_canceled(&cancel2)?;
-      match create_command(&resolved.path_env, program, args) {
+      match create_command(&path_env, program, args) {
         Ok(cmd) => match run_logged(&w2, &cancel2, label, cmd) {
           Ok(code) => {
             if code != 0 {
@@ -326,7 +355,7 @@ pub async fn uninstall_openclaw(window: Window, state: tauri::State<'_, TaskStat
       {
         // Prefer the npm that lives next to the resolved openclaw shim when using nvm-windows,
         // otherwise we might run a different Node installation's npm and not remove the right CLI.
-        let openclaw_dir = openclaw_cmd.parent().map(|p| p.to_path_buf());
+        let openclaw_dir = openclaw_cmd.as_ref().and_then(|c| c.parent().map(|p| p.to_path_buf()));
         let npm_next_to_openclaw = openclaw_dir.map(|d| d.join("npm.cmd")).filter(|p| p.is_file());
         if let Some(npm_cmd) = npm_next_to_openclaw {
           let npm_cmd = npm_cmd.to_string_lossy().to_string();
@@ -350,12 +379,38 @@ pub async fn uninstall_openclaw(window: Window, state: tauri::State<'_, TaskStat
     // nvm scan cleanup (delete ~/.nvm/... copy if that's where we resolved from)
     {
       check_canceled(&cancel2)?;
-      let mut removed = cleanup_mac_nvm_openclaw(&openclaw_cmd, OPENCLAW_NPM_PACKAGE).unwrap_or_default();
+      let mut removed = openclaw_cmd
+        .as_ref()
+        .and_then(|cmd| cleanup_mac_nvm_openclaw(cmd, OPENCLAW_NPM_PACKAGE).ok())
+        .unwrap_or_default();
       removed.extend(cleanup_all_mac_nvm_openclaw(OPENCLAW_NPM_PACKAGE).unwrap_or_default());
       if !removed.is_empty() {
         emit_log(&w2, "install-log", format!("[cleanup] nvm: removed {} item(s)", removed.len()));
         for item in removed {
           emit_log(&w2, "install-log", format!("[cleanup] nvm: {item}"));
+        }
+      }
+    }
+
+    // 2.5) Best-effort remove OpenClaw state/workspace dir when CLI uninstall fails.
+    // If `openclaw uninstall --state/--workspace` ran successfully, this is a no-op.
+    {
+      check_canceled(&cancel2)?;
+      if let Some(home) = crate::openclaw::home_dir() {
+        let state_dir = home.join(".openclaw");
+        if state_dir.exists() {
+          match std::fs::remove_dir_all(&state_dir) {
+            Ok(()) => emit_log(
+              &w2,
+              "install-log",
+              format!("[cleanup] removed: {}", state_dir.to_string_lossy()),
+            ),
+            Err(err) => emit_log(
+              &w2,
+              "install-log",
+              format!("[cleanup] failed to remove {}: {}", state_dir.to_string_lossy(), err),
+            ),
+          }
         }
       }
     }
@@ -410,6 +465,29 @@ pub async fn uninstall_openclaw(window: Window, state: tauri::State<'_, TaskStat
             emit_log(&w2, "install-log", format!("[cleanup] removed {} shim(s)", removed.len()));
             for item in removed {
               emit_log(&w2, "install-log", format!("[cleanup] shim: {item}"));
+            }
+          }
+
+          // If openclaw shims are present but the module is broken/missing (e.g. MODULE_NOT_FOUND),
+          // remove the global module dir next to the shim as a last resort.
+          check_canceled(&cancel2)?;
+          let module_dir = dir.join("node_modules").join(OPENCLAW_NPM_PACKAGE);
+          if module_dir.is_dir() {
+            match fs::remove_dir_all(&module_dir) {
+              Ok(()) => emit_log(
+                &w2,
+                "install-log",
+                format!("[cleanup] removed module dir: {}", module_dir.to_string_lossy()),
+              ),
+              Err(err) => emit_log(
+                &w2,
+                "install-log",
+                format!(
+                  "[cleanup] failed to remove module dir {}: {}",
+                  module_dir.to_string_lossy(),
+                  err
+                ),
+              ),
             }
           }
         }
