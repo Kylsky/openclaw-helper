@@ -124,8 +124,102 @@ fn run_openclaw_elevated(
 static WINDOWS_DIRECT_GATEWAY_CHILD: OnceLock<Mutex<Option<std::process::Child>>> = OnceLock::new();
 
 #[cfg(target_os = "windows")]
+#[derive(Debug, Deserialize, Serialize)]
+struct WindowsDirectGatewayRecord {
+  pid: u32,
+  #[serde(rename = "startTimeUtc")]
+  start_time_utc: String,
+}
+
+#[cfg(target_os = "windows")]
 fn windows_direct_gateway_child_state() -> &'static Mutex<Option<std::process::Child>> {
   WINDOWS_DIRECT_GATEWAY_CHILD.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_direct_gateway_record_path() -> PathBuf {
+  let base_dir = dirs::data_local_dir()
+    .or_else(crate::openclaw::home_dir)
+    .unwrap_or_else(std::env::temp_dir);
+  base_dir.join("openclaw-helper").join("windows-direct-gateway.json")
+}
+
+#[cfg(target_os = "windows")]
+fn clear_windows_direct_gateway_record() {
+  let path = windows_direct_gateway_record_path();
+  let _ = fs::remove_file(path);
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_direct_gateway_record() -> Option<WindowsDirectGatewayRecord> {
+  let path = windows_direct_gateway_record_path();
+  let raw = fs::read_to_string(&path).ok()?;
+  match serde_json::from_str::<WindowsDirectGatewayRecord>(&raw) {
+    Ok(record) => Some(record),
+    Err(_) => {
+      let _ = fs::remove_file(path);
+      None
+    }
+  }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_process_start_time_utc_once(pid: u32) -> Option<String> {
+  let mut cmd = Command::new("powershell");
+  apply_windows_no_window(&mut cmd);
+  cmd.args([
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    &format!(
+      "$p=Get-Process -Id {pid} -ErrorAction SilentlyContinue; if ($p) {{ [Console]::Out.Write($p.StartTime.ToUniversalTime().ToString('o')) }}"
+    ),
+  ]);
+  let output = cmd.output().ok()?;
+  let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+  if text.is_empty() {
+    None
+  } else {
+    Some(text)
+  }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_process_start_time_utc(pid: u32) -> Option<String> {
+  for attempt in 0..10 {
+    if let Some(value) = windows_process_start_time_utc_once(pid) {
+      return Some(value);
+    }
+    if attempt < 9 {
+      std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+  }
+  None
+}
+
+#[cfg(target_os = "windows")]
+fn persist_windows_direct_gateway_record(pid: u32) -> Result<(), String> {
+  let start_time_utc = windows_process_start_time_utc(pid)
+    .ok_or_else(|| format!("无法获取 direct gateway 进程启动时间（pid={pid}）"))?;
+  let path = windows_direct_gateway_record_path();
+  let value = serde_json::json!({
+    "pid": pid,
+    "startTimeUtc": start_time_utc,
+  });
+  atomic_write_json(&path, &value)
+}
+
+#[cfg(target_os = "windows")]
+fn tracked_windows_direct_gateway_pid() -> Option<u32> {
+  let record = read_windows_direct_gateway_record()?;
+  match windows_process_start_time_utc_once(record.pid) {
+    Some(actual_start_time) if actual_start_time == record.start_time_utc => Some(record.pid),
+    _ => {
+      clear_windows_direct_gateway_record();
+      None
+    }
+  }
 }
 
 #[cfg(target_os = "windows")]
@@ -166,6 +260,11 @@ fn windows_gateway_start_direct(
     }
   }
 
+  if let Some(pid) = tracked_windows_direct_gateway_pid() {
+    emit_log(window, "openclaw-log", format!("[gateway] 已在运行（direct, pid={pid}）"));
+    return Ok(());
+  }
+
   // Direct mode: run `openclaw gateway` (no Scheduled Task / no admin required).
   emit_log(
     window,
@@ -188,6 +287,9 @@ fn windows_gateway_start_direct(
     "openclaw-log",
     format!("[gateway] direct started (pid={})", child.id()),
   );
+  if let Err(err) = persist_windows_direct_gateway_record(child.id()) {
+    emit_log(window, "openclaw-log", format!("[warn] 记录 direct gateway 进程失败：{err}"));
+  }
   *slot = Some(child);
   Ok(())
 }
@@ -196,14 +298,25 @@ fn windows_gateway_start_direct(
 fn windows_gateway_stop_direct_best_effort(window: &Window) -> Result<bool, String> {
   let state = windows_direct_gateway_child_state();
   let mut slot = state.lock().map_err(|_| "内部错误：锁失败")?;
-  let Some(mut child) = slot.take() else {
+  if let Some(mut child) = slot.take() {
+    let pid = child.id();
+    emit_log(window, "openclaw-log", format!("[gateway] 停止 direct 进程（pid={pid}）…"));
+    windows_taskkill_tree_best_effort(pid);
+    let _ = child.wait();
+    clear_windows_direct_gateway_record();
+    emit_log(window, "openclaw-log", "[gateway] direct stopped");
+    return Ok(true);
+  }
+  drop(slot);
+
+  let Some(pid) = tracked_windows_direct_gateway_pid() else {
+    clear_windows_direct_gateway_record();
     return Ok(false);
   };
 
-  let pid = child.id();
   emit_log(window, "openclaw-log", format!("[gateway] 停止 direct 进程（pid={pid}）…"));
   windows_taskkill_tree_best_effort(pid);
-  let _ = child.wait();
+  clear_windows_direct_gateway_record();
   emit_log(window, "openclaw-log", "[gateway] direct stopped");
   Ok(true)
 }
@@ -281,14 +394,29 @@ pub async fn get_gateway_status() -> GatewayStatus {
   apply_windows_no_window(&mut cmd);
   cmd.env("PATH", &resolved.path_env);
   cmd.args(["--no-color", "gateway", "status"]);
-  match cmd.output() {
+  let mut status = match cmd.output() {
     Ok(output) => {
       let stdout = String::from_utf8_lossy(&output.stdout);
       let stderr = String::from_utf8_lossy(&output.stderr);
       parse_gateway_status(&format!("{stdout}\n{stderr}"))
     }
     Err(err) => parse_gateway_status(&format!("gateway status failed: {err}")),
+  };
+
+  #[cfg(target_os = "windows")]
+  {
+    if let Some(pid) = tracked_windows_direct_gateway_pid() {
+      if status.state != "running" {
+        if !status.raw.is_empty() {
+          status.raw.push('\n');
+        }
+        status.raw.push_str(&format!("[helper] tracked direct gateway pid={pid}"));
+        status.state = "running".into();
+      }
+    }
   }
+
+  status
 }
 
 #[tauri::command]
