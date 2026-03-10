@@ -5,6 +5,7 @@
 ## 功能
 
 - Windows：安装 `nvm-windows`（通过 `winget`）
+- Windows：自动检测系统架构并安装/升级 Node.js（通过 `winget`，确保 Node.js >= 22；在 x64 系统上优先使用 x64 Node；若检测到 32 位 Windows 会直接提示不支持）
 - macOS：优先复用系统已有 `node/npm`；如检测不到或版本过低且已安装 Homebrew，则通过 `brew install/upgrade node` 自动修复
 - 安装 `Git`（优先复用；macOS 无 Homebrew 时会尝试触发 Xcode Command Line Tools 安装）
 - 环境校验（node/npm/git 版本检测，`openclaw` 需要 Node.js >= 22）

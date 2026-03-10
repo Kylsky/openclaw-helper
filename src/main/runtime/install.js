@@ -340,6 +340,29 @@ async function refreshWindowsPath({ env, signal, onLog }) {
   return { ...baseEnv, PATH: merged };
 }
 
+function getWindowsOsArch(env) {
+  if (process.platform !== "win32") return null;
+
+  const base = env ?? process.env;
+  const raw = String(base.PROCESSOR_ARCHITEW6432 || base.PROCESSOR_ARCHITECTURE || "")
+    .trim()
+    .toLowerCase();
+
+  if (!raw) return null;
+  if (raw.includes("arm64")) return "arm64";
+  if (raw.includes("amd64") || raw === "x64") return "x64";
+  if (raw.includes("86") || raw === "x86" || raw === "ia32") return "ia32";
+  return null;
+}
+
+function getWingetArchitectureArg(osArch) {
+  if (!osArch) return null;
+  if (osArch === "x64") return "x64";
+  if (osArch === "arm64") return "arm64";
+  if (osArch === "ia32") return "x86";
+  return null;
+}
+
 function parseSemverMajor(text) {
   const match = String(text ?? "").trim().match(/(\d+)\.(\d+)\.(\d+)/);
   if (!match) return null;
@@ -366,6 +389,51 @@ function fileExistsSync(filePath) {
   } catch {
     return false;
   }
+}
+
+async function getNodeRuntimeInfo({ env, signal, onLog }) {
+  const hasNode = await commandExists("node", { env, signal });
+  if (!hasNode) return null;
+
+  let versionText = null;
+  let major = null;
+  let arch = null;
+  let whereFirst = null;
+
+  try {
+    const v = await runProcess({ command: "node", args: ["-v"], env, signal, collectOutput: true });
+    versionText = String(v.stdout ?? "").trim().replace(/^v/, "");
+    major = parseSemverMajor(versionText);
+  } catch {
+    versionText = null;
+    major = null;
+  }
+
+  try {
+    const a = await runProcess({ command: "node", args: ["-p", "process.arch"], env, signal, collectOutput: true });
+    arch = splitLines(`${a.stdout ?? ""}\n${a.stderr ?? ""}`)[0]?.trim() ?? null;
+  } catch {
+    arch = null;
+  }
+
+  if (process.platform === "win32") {
+    try {
+      const w = await runProcess({ command: "where", args: ["node"], env, signal, collectOutput: true });
+      whereFirst = splitLines(`${w.stdout ?? ""}\n${w.stderr ?? ""}`)[0]?.trim() ?? null;
+    } catch {
+      whereFirst = null;
+    }
+  }
+
+  if (onLog) {
+    const parts = [];
+    if (versionText) parts.push(`version=${versionText}`);
+    if (arch) parts.push(`arch=${arch}`);
+    if (whereFirst) parts.push(`path=${whereFirst}`);
+    if (parts.length) onLog(`Node 信息：${parts.join(", ")}`);
+  }
+
+  return { versionText, major, arch, whereFirst };
 }
 
 async function resolveNpmGlobalPrefix({ env, signal, onLog }) {
@@ -603,44 +671,140 @@ async function ensureNvm({ env, signal, onLog, options, context }) {
 
 async function ensureNode({ env, signal, onLog, options, context }) {
   if (process.platform === "win32") {
-    const hasNode = await commandExists("node", { env, signal });
-    const hasNpm = await commandExists("npm", { env, signal });
+    const osArch = getWindowsOsArch(context.env ?? env);
+    if (osArch === "ia32") {
+      throw new Error(
+        "检测到 32 位 Windows（x86）。当前 openclaw 安装需要 64 位 Windows（x64）。\n" +
+          "请安装 64 位 Windows，或在 64 位机器上运行本安装器；也可考虑使用 WSL2。"
+      );
+    }
 
-    if (hasNode && hasNpm) {
-      onLog?.("已检测到 Node.js / npm（Windows）");
+    const hasNpm = await commandExists("npm", { env, signal });
+    const nodeInfo = await getNodeRuntimeInfo({ env, signal, onLog }).catch(() => null);
+
+    const nodeOkByVersion = nodeInfo?.major != null && nodeInfo.major >= MIN_NODE_MAJOR;
+    const nodeOkByArch = osArch === "x64" ? nodeInfo?.arch === "x64" : true;
+    const nodeOk = Boolean(nodeInfo) && hasNpm && nodeOkByVersion && nodeOkByArch;
+
+    if (nodeOk) {
+      onLog?.(`已检测到 Node.js / npm（Windows, major=${nodeInfo.major}, arch=${nodeInfo.arch ?? "unknown"}）`);
       return;
     }
 
+    const problems = [];
+    if (!nodeInfo) problems.push("未检测到 node");
+    if (nodeInfo && !hasNpm) problems.push("未检测到 npm");
+    if (nodeInfo && !nodeOkByVersion) {
+      problems.push(
+        `Node 版本过低（major=${nodeInfo.major ?? "unknown"}，需要 >= ${MIN_NODE_MAJOR}）`
+      );
+    }
+    if (nodeInfo && !nodeOkByArch && osArch === "x64") {
+      problems.push(`Node 架构不匹配（当前 node=${nodeInfo.arch ?? "unknown"}，系统=${osArch}）`);
+    }
+
+    if (osArch === "arm64") {
+      onLog?.(
+        "检测到 Windows ARM64。若后续出现预编译二进制（win-x64）不兼容，建议改用 WSL2（Linux）安装。"
+      );
+    }
+
     if (!options.autoInstall) {
-      throw new Error("未检测到 Node.js。请先手动安装 Node.js（建议 LTS），然后重试。");
+      throw new Error(
+        `Node.js 环境不满足要求：${problems.join("；") || "未知原因"}。\n` +
+          `openclaw 需要 Node.js >= ${MIN_NODE_MAJOR}，且在 Windows x64 上建议使用 x64 Node。\n` +
+          "请先安装/升级 Node.js（建议 LTS 或 latest），然后重试。"
+      );
     }
 
     await ensureWinget({ env, signal });
-    onLog?.("正在通过 winget 安装 Node.js（LTS）…");
-    await runProcess({
-      command: "winget",
-      args: [
-        "install",
-        "-e",
-        "--id",
-        "OpenJS.NodeJS.LTS",
-        "--accept-package-agreements",
-        "--accept-source-agreements"
-      ],
-      env,
-      signal,
-      onLog
-    });
+
+    const nodePackageId = options.nodeChannel === "latest" ? "OpenJS.NodeJS" : "OpenJS.NodeJS.LTS";
+    const wingetArch = getWingetArchitectureArg(osArch);
+
+    const installArgs = [
+      "install",
+      "-e",
+      "--id",
+      nodePackageId,
+      "--accept-package-agreements",
+      "--accept-source-agreements"
+    ];
+    if (wingetArch) installArgs.push("--architecture", wingetArch);
+
+    const upgradeArgs = [
+      "upgrade",
+      "-e",
+      "--id",
+      nodePackageId,
+      "--accept-package-agreements",
+      "--accept-source-agreements"
+    ];
+    if (wingetArch) upgradeArgs.push("--architecture", wingetArch);
+
+    onLog?.(
+      `正在通过 winget 安装/升级 Node.js（${options.nodeChannel === "latest" ? "latest" : "LTS"}${wingetArch ? `, ${wingetArch}` : ""}）…`
+    );
+
+    // Try upgrade first (no-op if already up-to-date). Some winget versions may return success even when
+    // the package isn't installed, so we verify after and fall back to install if needed.
+    try {
+      await runProcess({ command: "winget", args: upgradeArgs, env, signal, onLog });
+    } catch {
+      // ignore and verify below; we'll try install if Node is still not usable.
+    }
 
     context.env = await refreshWindowsPath({ env: context.env, signal, onLog });
 
-    const nowHasNode = await commandExists("node", { env: context.env, signal });
-    const nowHasNpm = await commandExists("npm", { env: context.env, signal });
-    if (!nowHasNode || !nowHasNpm) {
-      throw new Error("Node.js 安装完成但当前进程未检测到 node/npm。请重启安装器后重试。");
+    // Nudge PATH to prefer the standard Node installer location if present.
+    const programFilesNode = "C:\\\\Program Files\\\\nodejs";
+    const programFilesX86Node = "C:\\\\Program Files (x86)\\\\nodejs";
+    context.env.PATH = mergePathEntries({
+      existingPath: context.env.PATH,
+      extraEntries: [programFilesNode, programFilesX86Node],
+      separator: ";",
+      extraFirst: true
+    });
+
+    const afterHasNpm = await commandExists("npm", { env: context.env, signal });
+    const afterNodeInfo = await getNodeRuntimeInfo({ env: context.env, signal, onLog }).catch(() => null);
+    const afterOkByVersion = afterNodeInfo?.major != null && afterNodeInfo.major >= MIN_NODE_MAJOR;
+    const afterOkByArch = osArch === "x64" ? afterNodeInfo?.arch === "x64" : true;
+
+    if (!afterNodeInfo || !afterHasNpm || !afterOkByVersion || !afterOkByArch) {
+      // Fall back to install if upgrade did not result in a usable Node.
+      await runProcess({ command: "winget", args: installArgs, env, signal, onLog });
+
+      context.env = await refreshWindowsPath({ env: context.env, signal, onLog });
+      context.env.PATH = mergePathEntries({
+        existingPath: context.env.PATH,
+        extraEntries: [programFilesNode, programFilesX86Node],
+        separator: ";",
+        extraFirst: true
+      });
     }
 
-    onLog?.("Node.js 安装完成");
+    const finalHasNpm = await commandExists("npm", { env: context.env, signal });
+    const finalNodeInfo = await getNodeRuntimeInfo({ env: context.env, signal, onLog }).catch(() => null);
+    const finalOkByVersion = finalNodeInfo?.major != null && finalNodeInfo.major >= MIN_NODE_MAJOR;
+    const finalOkByArch = osArch === "x64" ? finalNodeInfo?.arch === "x64" : true;
+
+    if (!finalNodeInfo || !finalHasNpm) {
+      throw new Error("Node.js 安装完成但当前进程未检测到 node/npm。请重启安装器后重试。");
+    }
+    if (!finalOkByVersion) {
+      throw new Error(
+        `Node.js 安装完成，但版本不满足要求（检测到：${finalNodeInfo.versionText || "unknown"}，需要 >= ${MIN_NODE_MAJOR}）。`
+      );
+    }
+    if (!finalOkByArch && osArch === "x64") {
+      throw new Error(
+        `Node.js 安装完成，但检测到的 node 架构仍为 ${finalNodeInfo.arch ?? "unknown"}（系统为 x64）。\n` +
+          "这通常是因为 PATH 里仍优先命中了旧的 32 位 Node。请重启安装器/系统后重试，或手动卸载 32 位 Node。"
+      );
+    }
+
+    onLog?.(`Node.js 安装完成（Windows, major=${finalNodeInfo.major}, arch=${finalNodeInfo.arch ?? "unknown"}）`);
     return;
   }
 
@@ -803,10 +967,27 @@ async function verifyEnvironment({ env, signal, onLog, options: _options, contex
     await runProcess({ command: "nvm", args: ["version"], env, signal, onLog }).catch(async () => {
       await runProcess({ command: "nvm", args: ["--version"], env, signal, onLog });
     });
-    await runProcess({ command: "node", args: ["-v"], env, signal, onLog });
+    const nodeResult = await runProcess({ command: "node", args: ["-v"], env, signal, onLog, collectOutput: true });
+    const versionText = String(nodeResult.stdout ?? "").trim().replace(/^v/, "");
+    const major = parseSemverMajor(versionText);
+    const osArch = getWindowsOsArch(env);
+    let nodeArch = null;
+    try {
+      const archResult = await runProcess({ command: "node", args: ["-p", "process.arch"], env, signal, collectOutput: true });
+      nodeArch = splitLines(`${archResult.stdout ?? ""}\n${archResult.stderr ?? ""}`)[0]?.trim() ?? null;
+    } catch {
+      nodeArch = null;
+    }
+
+    if (!major || major < MIN_NODE_MAJOR) {
+      throw new Error(`Node.js 版本不满足要求（检测到：${versionText || "unknown"}，需要 >= ${MIN_NODE_MAJOR}）。`);
+    }
+    if (osArch === "x64" && nodeArch && nodeArch !== "x64") {
+      throw new Error(`Node.js 架构不匹配（系统为 x64，但当前 node arch=${nodeArch}）。请安装/切换到 x64 Node。`);
+    }
     await runWindowsShim({ baseCommand: "npm", args: ["-v"], env, signal, onLog });
     await runProcess({ command: "git", args: ["--version"], env, signal, onLog });
-    onLog?.("环境校验通过（Windows）");
+    onLog?.(`环境校验通过（Windows, Node major=${major}${nodeArch ? `, arch=${nodeArch}` : ""}）`);
     return;
   }
 
