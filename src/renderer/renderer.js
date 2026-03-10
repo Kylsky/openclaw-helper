@@ -383,18 +383,22 @@ openDashboardBtn.addEventListener("click", async () => {
 });
 
 gatewayStartBtn.addEventListener("click", async () => {
+  const isWindows = /windows/i.test(navigator.userAgent || "");
+
   // If the service wasn't installed (or got removed), installing on-demand keeps
   // the UI simpler while still being resilient.
   const steps = [];
-  try {
-    const status = await installer.getGatewayStatus();
-    const raw = String(status?.raw || "");
-    const looksMissing = /scheduled task\s*\(missing\)|gateway service missing|service missing/i.test(raw);
-    if (status?.state === "not_installed" || looksMissing) {
-      steps.push({ args: ["gateway", "install"], stageLabel: "安装网关服务…" });
+  if (!isWindows) {
+    try {
+      const status = await installer.getGatewayStatus();
+      const raw = String(status?.raw || "");
+      const looksMissing = /scheduled task\s*\(missing\)|gateway service missing|service missing/i.test(raw);
+      if (status?.state === "not_installed" || looksMissing) {
+        steps.push({ args: ["gateway", "install"], stageLabel: "安装网关服务…" });
+      }
+    } catch {
+      // ignore and let start attempt run
     }
-  } catch {
-    // ignore and let start attempt run
   }
   steps.push({ args: ["gateway", "start"], stageLabel: "启动网关服务…" });
   await runOpenclawSequence(steps, { stageLabel: "启动网关服务…" });

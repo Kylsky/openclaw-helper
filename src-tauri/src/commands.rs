@@ -9,9 +9,13 @@ use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+#[cfg(target_os = "windows")]
+use std::sync::OnceLock;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Window};
 
@@ -117,107 +121,91 @@ fn run_openclaw_elevated(
 }
 
 #[cfg(target_os = "windows")]
-fn openclaw_extract_windows_gateway_task_name_from_status(output: &str) -> Option<String> {
-  // Example line (from `openclaw gateway status`):
-  // "Start with: schtasks /Run /TN \"OpenClaw Gateway\""
-  for line in split_lines(output) {
-    let lower = line.to_ascii_lowercase();
-    if !lower.contains("schtasks") || !lower.contains("/tn") {
-      continue;
-    }
+static WINDOWS_DIRECT_GATEWAY_CHILD: OnceLock<Mutex<Option<std::process::Child>>> = OnceLock::new();
 
-    let Some(tn_index) = lower.find("/tn") else {
-      continue;
-    };
-
-    let after = line.get(tn_index + 3..).unwrap_or_default();
-    let after = after.trim_start();
-    if after.is_empty() {
-      continue;
-    }
-
-    if let Some(rest) = after.strip_prefix('\"') {
-      if let Some(end) = rest.find('\"') {
-        let name = rest[..end].trim();
-        if !name.is_empty() {
-          return Some(name.to_string());
-        }
-      }
-      continue;
-    }
-
-    // No quotes: take the next token.
-    let token = after.split_whitespace().next().unwrap_or_default().trim();
-    if !token.is_empty() {
-      return Some(token.to_string());
-    }
-  }
-  None
+#[cfg(target_os = "windows")]
+fn windows_direct_gateway_child_state() -> &'static Mutex<Option<std::process::Child>> {
+  WINDOWS_DIRECT_GATEWAY_CHILD.get_or_init(|| Mutex::new(None))
 }
 
 #[cfg(target_os = "windows")]
-fn openclaw_windows_gateway_task_name_best_effort(resolved: &crate::openclaw::ResolvedOpenclaw) -> String {
-  if let Ok(name) = std::env::var("OPENCLAW_WINDOWS_TASK_NAME") {
-    let trimmed = name.trim();
-    if !trimmed.is_empty() {
-      return trimmed.to_string();
-    }
-  }
-
-  // Prefer extracting the task name from OpenClaw itself, because some builds/profiles
-  // may use a different task name.
-  let mut status_cmd = Command::new(&resolved.command);
-  apply_windows_no_window(&mut status_cmd);
-  status_cmd.env("PATH", &resolved.path_env);
-  status_cmd.args(["--no-color", "gateway", "status"]);
-  if let Ok(output) = status_cmd.output() {
-    let combined = format!(
-      "{}\n{}",
-      String::from_utf8_lossy(&output.stdout),
-      String::from_utf8_lossy(&output.stderr)
-    );
-    if let Some(name) = openclaw_extract_windows_gateway_task_name_from_status(&combined) {
-      return name;
-    }
-  }
-
-  "OpenClaw Gateway".into()
+fn windows_taskkill_tree_best_effort(pid: u32) {
+  let mut cmd = Command::new("taskkill");
+  apply_windows_no_window(&mut cmd);
+  let _ = cmd
+    .args(["/PID", &pid.to_string(), "/T", "/F"])
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status();
 }
 
 #[cfg(target_os = "windows")]
-fn windows_schtasks_output_is_already_running(output: &str) -> bool {
-  let lower = output.to_ascii_lowercase();
-  lower.contains("already running") || lower.contains("任务已在运行") || lower.contains("正在运行")
-}
-
-#[cfg(target_os = "windows")]
-fn run_openclaw_logged_capture(
+fn windows_gateway_start_direct(
   window: &Window,
   cancel: &Arc<AtomicBool>,
-  label: &str,
-  cmd: Command,
-) -> Result<(i32, String), String> {
+  resolved: &crate::openclaw::ResolvedOpenclaw,
+) -> Result<(), String> {
   check_canceled(cancel)?;
-  emit_log(window, "openclaw-log", format!("{label} {}", format_command_for_log(&cmd)));
 
-  let captured = Arc::new(Mutex::new(String::new()));
-  let captured2 = captured.clone();
+  let state = windows_direct_gateway_child_state();
+  let mut slot = state.lock().map_err(|_| "内部错误：锁失败")?;
 
-  let w = window.clone();
-  let prefix = label.to_string();
-  let cancel2 = cancel.clone();
-  let code = spawn_with_streaming_logs_cancelable(cmd, cancel2, move |line| {
-    emit_log(&w, "openclaw-log", format!("{prefix} {line}"));
-    if let Ok(mut buf) = captured2.lock() {
-      if buf.len() < 120_000 {
-        buf.push_str(&line);
-        buf.push('\n');
+  // If we already started a direct gateway and it's still running, treat as OK.
+  if let Some(child) = slot.as_mut() {
+    match child.try_wait() {
+      Ok(None) => {
+        emit_log(window, "openclaw-log", "[gateway] 已在运行（direct）");
+        return Ok(());
+      }
+      Ok(Some(_)) => {
+        *slot = None;
+      }
+      Err(_) => {
+        *slot = None;
       }
     }
-  })?;
+  }
 
-  let text = captured.lock().map(|s| s.clone()).unwrap_or_default();
-  Ok((code, text))
+  // Direct mode: run `openclaw gateway` (no Scheduled Task / no admin required).
+  emit_log(
+    window,
+    "openclaw-log",
+    "[windows] 使用 direct 模式启动网关（不依赖 Scheduled Task / 无需管理员）",
+  );
+
+  let mut cmd = Command::new(&resolved.command);
+  apply_windows_no_window(&mut cmd);
+  cmd.env("PATH", &resolved.path_env);
+  cmd.args(["--no-color", "gateway"]);
+  cmd.stdout(Stdio::null());
+  cmd.stderr(Stdio::null());
+
+  emit_log(window, "openclaw-log", format!("[gateway] {}", format_command_for_log(&cmd)));
+
+  let child = cmd.spawn().map_err(|e| e.to_string())?;
+  emit_log(
+    window,
+    "openclaw-log",
+    format!("[gateway] direct started (pid={})", child.id()),
+  );
+  *slot = Some(child);
+  Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_gateway_stop_direct_best_effort(window: &Window) -> Result<bool, String> {
+  let state = windows_direct_gateway_child_state();
+  let mut slot = state.lock().map_err(|_| "内部错误：锁失败")?;
+  let Some(mut child) = slot.take() else {
+    return Ok(false);
+  };
+
+  let pid = child.id();
+  emit_log(window, "openclaw-log", format!("[gateway] 停止 direct 进程（pid={pid}）…"));
+  windows_taskkill_tree_best_effort(pid);
+  let _ = child.wait();
+  emit_log(window, "openclaw-log", "[gateway] direct stopped");
+  Ok(true)
 }
 
 fn emit_progress(window: &Window, stage: &str, title: &str, index: u32, total: u32) {
@@ -339,46 +327,18 @@ pub async fn run_openclaw(window: Window, state: tauri::State<'_, TaskState>, ar
         return Err(format!("gateway install 失败（退出码 {code}）"));
       }
 
-      // Some Windows environments hang after printing "Restarted Scheduled Task: OpenClaw Gateway"
-      // when running `openclaw gateway start`. To keep the UI responsive, start the scheduled task
-      // directly and return once schtasks succeeds.
+      // Windows: start/stop the gateway in direct mode by default (no Scheduled Task).
       let is_gateway_start = args.len() == 2 && args[0] == "gateway" && args[1] == "start";
       if is_gateway_start {
-        let task_name = openclaw_windows_gateway_task_name_best_effort(&resolved);
-        emit_log(
-          &w2,
-          "openclaw-log",
-          format!("[windows] gateway start => schtasks /Run (task: {task_name})"),
-        );
+        windows_gateway_start_direct(&w2, &cancel2, &resolved)?;
+        return Ok(());
+      }
 
-        // Stop any existing instance (best-effort).
-        let mut end_cmd = Command::new("schtasks");
-        apply_windows_no_window(&mut end_cmd);
-        end_cmd.env("PATH", &resolved.path_env);
-        end_cmd.args(["/End", "/TN"]);
-        end_cmd.arg(&task_name);
-        let (end_code, _end_out) = run_openclaw_logged_capture(&w2, &cancel2, "[schtasks]", end_cmd)?;
-        if end_code != 0 {
-          emit_log(&w2, "openclaw-log", "[warn] schtasks /End 失败（已忽略）");
-        }
-
-        let mut run_cmd = Command::new("schtasks");
-        apply_windows_no_window(&mut run_cmd);
-        run_cmd.env("PATH", &resolved.path_env);
-        run_cmd.args(["/Run", "/TN"]);
-        run_cmd.arg(&task_name);
-        let (run_code, run_out) = run_openclaw_logged_capture(&w2, &cancel2, "[schtasks]", run_cmd)?;
-        if run_code == 0 || windows_schtasks_output_is_already_running(&run_out) {
-          emit_log(&w2, "openclaw-log", "[gateway] start triggered (schtasks)");
-          emit_log(
-            &w2,
-            "openclaw-log",
-            "[tip] 若状态未及时刷新，请等待几秒后点击“检查网关状态”。",
-          );
+      let is_gateway_stop = args.len() == 2 && args[0] == "gateway" && args[1] == "stop";
+      if is_gateway_stop {
+        if windows_gateway_stop_direct_best_effort(&w2)? {
           return Ok(());
         }
-
-        return Err(format!("gateway start 失败（schtasks 退出码 {run_code}）"));
       }
     }
 

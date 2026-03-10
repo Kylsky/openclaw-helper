@@ -9,6 +9,8 @@ const DEFAULT_NPM_REGISTRY = "https://registry.npmmirror.com";
 const DEFAULT_GITHUB_MIRROR = "https://gitclone.com/github.com/";
 const MIN_NODE_MAJOR = 22;
 
+let windowsDirectGatewayProcess = null;
+
 function assertNotAborted(signal) {
   if (!signal) return;
   if (!signal.aborted) return;
@@ -81,38 +83,20 @@ function safeUrl(url) {
   return parsed.toString();
 }
 
-function extractWindowsGatewayTaskNameFromStatusOutput(output) {
-  const lines = splitLines(output);
-  for (const line of lines) {
-    const lower = line.toLowerCase();
-    if (!lower.includes("schtasks") || !lower.includes("/tn")) continue;
-
-    const tnIndex = lower.indexOf("/tn");
-    if (tnIndex < 0) continue;
-
-    let after = line.slice(tnIndex + 3).trimStart();
-    if (!after) continue;
-
-    if (after.startsWith("\"")) {
-      after = after.slice(1);
-      const end = after.indexOf("\"");
-      if (end >= 0) {
-        const name = after.slice(0, end).trim();
-        if (name) return name;
-      }
-      continue;
-    }
-
-    const token = after.split(/\s+/g)[0]?.trim();
-    if (token) return token;
+async function taskkillWindowsTreeBestEffort({ pid, env, signal, onLog }) {
+  if (!pid) return;
+  try {
+    await runProcess({
+      command: "taskkill",
+      args: ["/PID", String(pid), "/T", "/F"],
+      env,
+      signal,
+      onLog: onLog ? (line) => onLog(`[taskkill] ${line}`) : null,
+      collectOutput: false
+    });
+  } catch (error) {
+    onLog?.(`[warn] taskkill 失败（已忽略）：${error?.message || String(error)}`);
   }
-
-  return null;
-}
-
-function schtasksOutputLooksLikeAlreadyRunning(text) {
-  const lower = String(text ?? "").toLowerCase();
-  return lower.includes("already running") || lower.includes("任务已在运行") || lower.includes("正在运行");
 }
 
 function isDisableKeyword(value) {
@@ -1539,64 +1523,44 @@ async function runOpenclawCommand({ signal, args, onLog }) {
   if (!resolved) throw new Error("未检测到 openclaw，请先完成安装。");
   const baseEnv = resolved.env;
 
-  // Windows workaround: `openclaw gateway start` sometimes hangs after printing
-  // "Restarted Scheduled Task: OpenClaw Gateway". Start the scheduled task directly
-  // so the UI doesn't get stuck waiting for OpenClaw to exit.
-  if (process.platform === "win32" && args?.[0] === "gateway" && args?.[1] === "start" && args.length === 2) {
-    const explicitName = String(process.env.OPENCLAW_WINDOWS_TASK_NAME ?? "").trim();
-    let taskName = explicitName || "OpenClaw Gateway";
-
-    if (!explicitName) {
-      try {
-        const status = await runWindowsShim({
-          baseCommand: resolved.command,
-          args: ["--no-color", "gateway", "status"],
-          env: baseEnv,
-          signal,
-          onLog: onLog ? (line) => onLog(`[openclaw] ${line}`) : null,
-          collectOutput: true
-        });
-        const combined = `${status.stdout ?? ""}\n${status.stderr ?? ""}`;
-        taskName = extractWindowsGatewayTaskNameFromStatusOutput(combined) || taskName;
-      } catch {
-        // ignore and use default
-      }
-    }
-
-    onLog?.(`[windows] gateway start => schtasks /Run (task: ${taskName})`);
-
-    try {
-      await runProcess({
-        command: "schtasks",
-        args: ["/End", "/TN", taskName],
-        env: baseEnv,
-        signal,
-        onLog: onLog ? (line) => onLog(`[schtasks] ${line}`) : null,
-        collectOutput: true
-      });
-    } catch {
-      onLog?.("[warn] schtasks /End 失败（已忽略）");
-    }
-
-    try {
-      await runProcess({
-        command: "schtasks",
-        args: ["/Run", "/TN", taskName],
-        env: baseEnv,
-        signal,
-        onLog: onLog ? (line) => onLog(`[schtasks] ${line}`) : null,
-        collectOutput: true
-      });
-      onLog?.("[gateway] start triggered (schtasks)");
-      onLog?.("[tip] 若状态未及时刷新，请等待几秒后点击“检查网关状态”。");
-      return { ok: true };
-    } catch (error) {
-      const combined = `${error?.stdout ?? ""}\n${error?.stderr ?? ""}`;
-      if (schtasksOutputLooksLikeAlreadyRunning(combined)) {
-        onLog?.("[gateway] already running");
+  // Windows: by default, avoid Scheduled Task service and run gateway directly (no admin).
+  if (process.platform === "win32" && args?.[0] === "gateway" && args.length >= 2) {
+    const isStart = args[1] === "start" && args.length === 2;
+    const isStop = args[1] === "stop" && args.length === 2;
+    if (isStart) {
+      if (windowsDirectGatewayProcess?.pid && windowsDirectGatewayProcess.exitCode == null) {
+        onLog?.("[gateway] 已在运行（direct）");
         return { ok: true };
       }
-      throw error;
+
+      const finalArgs = ["--no-color", "gateway"];
+      onLog?.(`[windows] gateway start => openclaw ${finalArgs.join(" ")} (direct)`);
+      const child = spawn(resolved.command, finalArgs, {
+        env: baseEnv,
+        windowsHide: true,
+        detached: false,
+        stdio: ["ignore", "ignore", "ignore"]
+      });
+      windowsDirectGatewayProcess = child;
+      try {
+        child.unref();
+      } catch {
+        // ignore
+      }
+      onLog?.(`[gateway] direct started (pid=${child.pid})`);
+      onLog?.("[tip] 若状态未及时刷新，请等待几秒后点击“检查网关状态”。");
+      return { ok: true };
+    }
+
+    if (isStop) {
+      const pid = windowsDirectGatewayProcess?.pid;
+      if (pid) {
+        onLog?.(`[gateway] 停止 direct 进程（pid=${pid}）…`);
+        await taskkillWindowsTreeBestEffort({ pid, env: baseEnv, signal, onLog });
+        windowsDirectGatewayProcess = null;
+        onLog?.("[gateway] direct stopped");
+        return { ok: true };
+      }
     }
   }
 
