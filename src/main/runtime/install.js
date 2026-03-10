@@ -81,6 +81,40 @@ function safeUrl(url) {
   return parsed.toString();
 }
 
+function extractWindowsGatewayTaskNameFromStatusOutput(output) {
+  const lines = splitLines(output);
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    if (!lower.includes("schtasks") || !lower.includes("/tn")) continue;
+
+    const tnIndex = lower.indexOf("/tn");
+    if (tnIndex < 0) continue;
+
+    let after = line.slice(tnIndex + 3).trimStart();
+    if (!after) continue;
+
+    if (after.startsWith("\"")) {
+      after = after.slice(1);
+      const end = after.indexOf("\"");
+      if (end >= 0) {
+        const name = after.slice(0, end).trim();
+        if (name) return name;
+      }
+      continue;
+    }
+
+    const token = after.split(/\s+/g)[0]?.trim();
+    if (token) return token;
+  }
+
+  return null;
+}
+
+function schtasksOutputLooksLikeAlreadyRunning(text) {
+  const lower = String(text ?? "").toLowerCase();
+  return lower.includes("already running") || lower.includes("任务已在运行") || lower.includes("正在运行");
+}
+
 function isDisableKeyword(value) {
   const lower = String(value ?? "").trim().toLowerCase();
   return ["off", "false", "none", "direct", "disable", "disabled", "0"].includes(lower);
@@ -1504,6 +1538,67 @@ async function runOpenclawCommand({ signal, args, onLog }) {
   const resolved = await resolveOpenclawExecution({ env, signal, onLog });
   if (!resolved) throw new Error("未检测到 openclaw，请先完成安装。");
   const baseEnv = resolved.env;
+
+  // Windows workaround: `openclaw gateway start` sometimes hangs after printing
+  // "Restarted Scheduled Task: OpenClaw Gateway". Start the scheduled task directly
+  // so the UI doesn't get stuck waiting for OpenClaw to exit.
+  if (process.platform === "win32" && args?.[0] === "gateway" && args?.[1] === "start" && args.length === 2) {
+    const explicitName = String(process.env.OPENCLAW_WINDOWS_TASK_NAME ?? "").trim();
+    let taskName = explicitName || "OpenClaw Gateway";
+
+    if (!explicitName) {
+      try {
+        const status = await runWindowsShim({
+          baseCommand: resolved.command,
+          args: ["--no-color", "gateway", "status"],
+          env: baseEnv,
+          signal,
+          onLog: onLog ? (line) => onLog(`[openclaw] ${line}`) : null,
+          collectOutput: true
+        });
+        const combined = `${status.stdout ?? ""}\n${status.stderr ?? ""}`;
+        taskName = extractWindowsGatewayTaskNameFromStatusOutput(combined) || taskName;
+      } catch {
+        // ignore and use default
+      }
+    }
+
+    onLog?.(`[windows] gateway start => schtasks /Run (task: ${taskName})`);
+
+    try {
+      await runProcess({
+        command: "schtasks",
+        args: ["/End", "/TN", taskName],
+        env: baseEnv,
+        signal,
+        onLog: onLog ? (line) => onLog(`[schtasks] ${line}`) : null,
+        collectOutput: true
+      });
+    } catch {
+      onLog?.("[warn] schtasks /End 失败（已忽略）");
+    }
+
+    try {
+      await runProcess({
+        command: "schtasks",
+        args: ["/Run", "/TN", taskName],
+        env: baseEnv,
+        signal,
+        onLog: onLog ? (line) => onLog(`[schtasks] ${line}`) : null,
+        collectOutput: true
+      });
+      onLog?.("[gateway] start triggered (schtasks)");
+      onLog?.("[tip] 若状态未及时刷新，请等待几秒后点击“检查网关状态”。");
+      return { ok: true };
+    } catch (error) {
+      const combined = `${error?.stdout ?? ""}\n${error?.stderr ?? ""}`;
+      if (schtasksOutputLooksLikeAlreadyRunning(combined)) {
+        onLog?.("[gateway] already running");
+        return { ok: true };
+      }
+      throw error;
+    }
+  }
 
   const finalArgs = ["--no-color", ...args];
   onLog?.(`openclaw ${finalArgs.join(" ")} (${resolved.source})`);
