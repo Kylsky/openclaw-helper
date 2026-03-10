@@ -534,7 +534,12 @@ pub fn parse_gateway_status(text: &str) -> GatewayStatus {
       || lower.contains("service unit not found")
       || (lower.contains("unit") && lower.contains("not found"))
       || lower.contains("loaded: not-found")
-      || lower.contains("not-found");
+      || lower.contains("not-found")
+      // Windows Scheduled Task based service
+      || lower.contains("scheduled task (missing)")
+      || (lower.contains("scheduled task") && lower.contains("missing"))
+      || lower.contains("gateway service missing")
+      || (lower.contains("service") && lower.contains("missing") && lower.contains("gateway"));
 
   let state = if has_running {
     "running"
