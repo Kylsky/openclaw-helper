@@ -480,10 +480,17 @@ pub fn parse_gateway_status(text: &str) -> GatewayStatus {
   let lower = raw.to_lowercase();
   let dashboard_url = extract_dashboard_url(&raw);
 
+  // Some platforms (notably Windows) may report "service missing" while the gateway is still
+  // reachable via its RPC/WS probe. Treat a successful probe/listening line as "running".
+  let has_rpc_ok = lower.contains("rpc probe: ok") || lower.contains("rpc probe ok");
+  let has_listening = lower.contains("listening:") || lower.contains("listening on ");
+
   let has_running =
-    raw.to_lowercase().contains("active: active")
+    lower.contains("active: active")
       || lower.contains("(running)")
-      || (lower.contains("running") && !lower.contains("not running"));
+      || (lower.contains("running") && !lower.contains("not running"))
+      || has_rpc_ok
+      || has_listening;
 
   let has_stopped =
     lower.contains("not running")
