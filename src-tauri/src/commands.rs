@@ -849,8 +849,15 @@ fn log_environment(window: &Window, cancel: &Arc<AtomicBool>, path_env: &str) {
 
 fn start_install_blocking(window: &Window, cancel: &Arc<AtomicBool>, options: InstallOptions) -> Result<(), String> {
   const MIN_NODE_MAJOR: u32 = 22;
+  const DEFAULT_NPM_REGISTRY: &str = "https://registry.npmmirror.com";
 
   let openclaw_package = validate_npm_package_name(options.openclaw_package.as_deref().unwrap_or("openclaw"))?;
+  let npm_registry = options
+    .npm_registry
+    .as_deref()
+    .map(|v| v.trim().to_string())
+    .filter(|v| !v.is_empty())
+    .unwrap_or_else(|| DEFAULT_NPM_REGISTRY.to_string());
   #[allow(unused_mut)]
   let mut path_env = create_base_path_env();
 
@@ -863,9 +870,7 @@ fn start_install_blocking(window: &Window, cancel: &Arc<AtomicBool>, options: In
   emit_progress(window, "prepare", "准备环境…", 1, total);
   emit_log(window, "install-log", format!("平台：{} / {}", std::env::consts::OS, std::env::consts::ARCH));
   emit_log(window, "install-log", format!("openclaw 包名：{openclaw_package}"));
-  if let Some(reg) = options.npm_registry.as_ref() {
-    emit_log(window, "install-log", format!("npm registry: {reg}"));
-  }
+  emit_log(window, "install-log", format!("npm registry: {npm_registry}"));
 
   log_environment(window, cancel, &path_env);
 
@@ -1028,9 +1033,9 @@ fn start_install_blocking(window: &Window, cancel: &Arc<AtomicBool>, options: In
     npm_cmd.env("GIT_CONFIG_KEY_1", "url.https://github.com/.insteadOf");
     npm_cmd.env("GIT_CONFIG_VALUE_1", "git@github.com:");
   }
-  if let Some(reg) = options.npm_registry.as_ref() {
-    npm_cmd.env("npm_config_registry", reg);
-  }
+  // Use a user-provided registry if present; otherwise default to a China-friendly mirror
+  // to avoid slow global downloads. Applies only to this npm process.
+  npm_cmd.env("npm_config_registry", &npm_registry);
   let code = run_logged(window, cancel, "[npm]", npm_cmd)?;
   if code != 0 {
     return Err("npm install -g 失败，请查看日志。".into());

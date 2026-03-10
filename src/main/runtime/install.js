@@ -5,6 +5,7 @@ const path = require("node:path");
 const os = require("node:os");
 
 const DEFAULT_OPENCLAW_PACKAGE = "openclaw";
+const DEFAULT_NPM_REGISTRY = "https://registry.npmmirror.com";
 const MIN_NODE_MAJOR = 22;
 
 function assertNotAborted(signal) {
@@ -105,7 +106,8 @@ function validateOptions(options) {
     throw new Error("Node 安装通道无效（仅支持 lts / latest）");
   }
 
-  const npmRegistry = options?.npmRegistry ? safeUrl(options.npmRegistry) : null;
+  const npmRegistryRaw = options?.npmRegistry != null ? String(options.npmRegistry).trim() : "";
+  const npmRegistry = npmRegistryRaw ? safeUrl(npmRegistryRaw) : DEFAULT_NPM_REGISTRY;
 
   return {
     autoInstall,
