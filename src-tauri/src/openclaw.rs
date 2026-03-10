@@ -24,6 +24,19 @@ pub fn apply_windows_no_window(cmd: &mut Command) {
   }
 }
 
+#[cfg(target_os = "windows")]
+fn kill_process_tree_best_effort(pid: u32) {
+  // On Windows, killing only the parent process is often not enough because common shims
+  // (e.g. npm.cmd) spawn child processes (cmd.exe -> node.exe). Use taskkill /T to kill the tree.
+  let mut cmd = Command::new("taskkill");
+  apply_windows_no_window(&mut cmd);
+  let _ = cmd
+    .args(["/PID", &pid.to_string(), "/T", "/F"])
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status();
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedOpenclaw {
   pub command: PathBuf,
@@ -772,7 +785,14 @@ pub fn spawn_with_streaming_logs_cancelable(
 
   loop {
     if cancel.load(AtomicOrdering::SeqCst) {
-      let _ = child.kill();
+      #[cfg(target_os = "windows")]
+      {
+        kill_process_tree_best_effort(child.id());
+      }
+      #[cfg(not(target_os = "windows"))]
+      {
+        let _ = child.kill();
+      }
       let _ = child.wait();
       let _ = out_thread.join();
       let _ = err_thread.join();

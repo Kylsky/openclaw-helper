@@ -277,15 +277,21 @@ async function runOpenclaw(args, { stageLabel }) {
 
 showLogsCheckbox.addEventListener("change", () => updateLogVisibility());
 
-stopBtn.addEventListener("click", async () => {
+const requestCancelTask = async () => {
   if (!taskRunning) return;
-  await installer.cancelTask();
-});
+  showLogsCheckbox.checked = true;
+  updateLogVisibility();
+  appendLog("[ui] 请求取消任务…");
+  setStage("取消中…");
+  try {
+    await installer.cancelTask();
+  } catch (error) {
+    appendLog(`[错误] 取消失败：${error?.message || String(error)}`);
+  }
+};
 
-cancelBtn.addEventListener("click", async () => {
-  if (!taskRunning) return;
-  await installer.cancelTask();
-});
+stopBtn.addEventListener("click", requestCancelTask);
+cancelBtn.addEventListener("click", requestCancelTask);
 
 installBtn.addEventListener("click", async () => {
   if (taskRunning) return;
