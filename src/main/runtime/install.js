@@ -1004,11 +1004,24 @@ async function verifyEnvironment({ env, signal, onLog, options: _options, contex
   onLog?.(`环境校验通过（macOS, Node major=${major}）`);
 }
 
+function withGithubSshRewriteEnv(env, { onLog } = {}) {
+  if (process.platform !== "win32") return env;
+  const out = { ...(env || {}) };
+  onLog?.("已启用 GitHub SSH -> HTTPS 重写（避免 git@github.com 权限问题；仅本次安装进程生效）");
+  out.GIT_CONFIG_COUNT = "2";
+  out.GIT_CONFIG_KEY_0 = "url.https://github.com/.insteadOf";
+  out.GIT_CONFIG_VALUE_0 = "ssh://git@github.com/";
+  out.GIT_CONFIG_KEY_1 = "url.https://github.com/.insteadOf";
+  out.GIT_CONFIG_VALUE_1 = "git@github.com:";
+  return out;
+}
+
 async function installOpenclaw({ env, signal, onLog, options, context: _context }) {
   onLog?.(`开始安装：npm install -g ${options.openclawPackage}`);
 
   if (process.platform === "win32") {
-    await runWindowsShim({ baseCommand: "npm", args: ["install", "-g", options.openclawPackage], env, signal, onLog });
+    const installEnv = withGithubSshRewriteEnv(env, { onLog });
+    await runWindowsShim({ baseCommand: "npm", args: ["install", "-g", options.openclawPackage], env: installEnv, signal, onLog });
 
     onLog?.("全局安装完成，尝试验证 openclaw 命令…");
     try {

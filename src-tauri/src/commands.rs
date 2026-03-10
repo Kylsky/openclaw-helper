@@ -977,6 +977,21 @@ pub async fn start_install(window: Window, state: tauri::State<'_, TaskState>, o
     npm_cmd.env("npm_config_progress", "false");
     npm_cmd.env("npm_config_fund", "false");
     npm_cmd.env("npm_config_audit", "false");
+    #[cfg(target_os = "windows")]
+    {
+      // Workaround: some npm dependencies may use GitHub SSH URLs (e.g. ssh://git@github.com/...)
+      // which fails on machines without SSH keys. Rewrite to HTTPS for this install process only.
+      emit_log(
+        &window,
+        "install-log",
+        "已启用 GitHub SSH -> HTTPS 重写（避免 git@github.com 权限问题；仅本次安装生效）",
+      );
+      npm_cmd.env("GIT_CONFIG_COUNT", "2");
+      npm_cmd.env("GIT_CONFIG_KEY_0", "url.https://github.com/.insteadOf");
+      npm_cmd.env("GIT_CONFIG_VALUE_0", "ssh://git@github.com/");
+      npm_cmd.env("GIT_CONFIG_KEY_1", "url.https://github.com/.insteadOf");
+      npm_cmd.env("GIT_CONFIG_VALUE_1", "git@github.com:");
+    }
     if let Some(reg) = options.npm_registry.as_ref() {
       npm_cmd.env("npm_config_registry", reg);
     }
