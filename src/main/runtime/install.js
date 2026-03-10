@@ -1051,7 +1051,14 @@ async function installOpenclaw({ env, signal, onLog, options, context: _context 
   onLog?.(`开始安装：npm install -g ${options.openclawPackage}`);
 
   if (process.platform === "win32") {
-    const installEnv = withGithubSshRewriteEnv(env, { onLog, githubMirror: options.githubMirror });
+    const installEnv = withGithubSshRewriteEnv(
+      {
+        ...(env || {}),
+        NODE_LLAMA_CPP_SKIP_DOWNLOAD: "1"
+      },
+      { onLog, githubMirror: options.githubMirror }
+    );
+    onLog?.("NODE_LLAMA_CPP_SKIP_DOWNLOAD=1（跳过 node-llama-cpp 安装期下载/编译，提升 Windows 安装成功率）");
     await runWindowsShim({ baseCommand: "npm", args: ["install", "-g", options.openclawPackage], env: installEnv, signal, onLog });
 
     onLog?.("全局安装完成，尝试验证 openclaw 命令…");

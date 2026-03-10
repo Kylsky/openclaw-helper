@@ -1228,6 +1228,21 @@ fn start_install_blocking(window: &Window, cancel: &Arc<AtomicBool>, options: In
   npm_cmd.env("npm_config_progress", "false");
   npm_cmd.env("npm_config_fund", "false");
   npm_cmd.env("npm_config_audit", "false");
+  #[cfg(target_os = "windows")]
+  {
+    // OpenClaw currently declares `node-llama-cpp` as a peer dependency. On npm (v7+),
+    // peers are auto-installed and `node-llama-cpp` runs a heavy postinstall that may crash
+    // or hang on Windows (and often needs GitHub access / build tools).
+    //
+    // We skip the postinstall download/compile during installation to keep the core CLI install reliable.
+    // Users who need local embeddings can rebuild/download later.
+    emit_log(
+      window,
+      "install-log",
+      "[npm] NODE_LLAMA_CPP_SKIP_DOWNLOAD=1（跳过 node-llama-cpp 安装期下载/编译，提升 Windows 安装成功率）",
+    );
+    npm_cmd.env("NODE_LLAMA_CPP_SKIP_DOWNLOAD", "1");
+  }
   // Workaround: some npm dependencies may use GitHub SSH URLs (e.g. ssh://git@github.com/...)
   // which fails on machines without SSH keys (and can be slow/blocked on some networks).
   apply_github_git_rewrite_env(window, &mut npm_cmd, github_mirror.as_deref());
