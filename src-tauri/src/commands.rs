@@ -4,6 +4,8 @@ use crate::openclaw::{
 };
 use serde::Deserialize;
 use serde::Serialize;
+#[cfg(target_os = "windows")]
+use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -263,43 +265,78 @@ pub async fn uninstall_openclaw(window: Window, state: tauri::State<'_, TaskStat
     }
 
     // 2) Best-effort remove CLI from common managers.
-    emit_log(&window, "install-log", "正在尝试移除 openclaw CLI（brew / npm / pnpm / nvm）…");
+    const OPENCLAW_NPM_PACKAGE: &str = "openclaw";
+    emit_log(
+      &window,
+      "install-log",
+      "正在尝试移除 openclaw CLI（brew / npm / pnpm / nvm；Windows: nvm-windows / npm shim）…",
+    );
+
+    let run_best_effort = |label: &str, program: &str, args: &[&str]| {
+      check_canceled(&cancel)?;
+      match create_command(&resolved.path_env, program, args) {
+        Ok(cmd) => match run_logged(&window, &cancel, label, cmd) {
+          Ok(code) => {
+            if code != 0 {
+              emit_log(
+                &window,
+                "install-log",
+                format!("[cleanup] {label} exited with code {code} (ignored)"),
+              );
+            }
+          }
+          Err(err) => {
+            emit_log(&window, "install-log", format!("[cleanup] {label} failed (ignored): {err}"));
+          }
+        },
+        Err(err) => {
+          emit_log(&window, "install-log", format!("[cleanup] {label} skipped: {err}"));
+        }
+      }
+      Ok::<(), String>(())
+    };
 
     #[cfg(target_os = "macos")]
     {
       let brew_candidates = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew", "brew"];
       for brew in brew_candidates {
         check_canceled(&cancel)?;
-        let mut cmd = Command::new(brew);
-        cmd.env("PATH", &resolved.path_env);
-        cmd.args(["uninstall", "openclaw"]);
-        let _ = cmd.output();
+        run_best_effort("[brew]", brew, &["uninstall", "openclaw"])?;
       }
     }
 
     // npm uninstall -g openclaw (best-effort)
     {
-      check_canceled(&cancel)?;
-      let mut cmd = Command::new("npm");
-      cmd.env("PATH", &resolved.path_env);
-      cmd.args(["uninstall", "-g", "openclaw"]);
-      let _ = cmd.output();
+      #[cfg(target_os = "windows")]
+      {
+        // Prefer the npm that lives next to the resolved openclaw shim when using nvm-windows,
+        // otherwise we might run a different Node installation's npm and not remove the right CLI.
+        let openclaw_dir = openclaw_cmd.parent().map(|p| p.to_path_buf());
+        let npm_next_to_openclaw = openclaw_dir.map(|d| d.join("npm.cmd")).filter(|p| p.is_file());
+        if let Some(npm_cmd) = npm_next_to_openclaw {
+          let npm_cmd = npm_cmd.to_string_lossy().to_string();
+          emit_log(&window, "install-log", format!("[cleanup] using npm: {npm_cmd}"));
+          run_best_effort("[npm]", &npm_cmd, &["uninstall", "-g", OPENCLAW_NPM_PACKAGE])?;
+        } else {
+          run_best_effort("[npm]", "npm", &["uninstall", "-g", OPENCLAW_NPM_PACKAGE])?;
+        }
+      }
+      #[cfg(not(target_os = "windows"))]
+      {
+        run_best_effort("[npm]", "npm", &["uninstall", "-g", OPENCLAW_NPM_PACKAGE])?;
+      }
     }
 
     // pnpm remove -g openclaw (best-effort)
     {
-      check_canceled(&cancel)?;
-      let mut cmd = Command::new("pnpm");
-      cmd.env("PATH", &resolved.path_env);
-      cmd.args(["remove", "-g", "openclaw"]);
-      let _ = cmd.output();
+      run_best_effort("[pnpm]", "pnpm", &["remove", "-g", OPENCLAW_NPM_PACKAGE])?;
     }
 
     // nvm scan cleanup (delete ~/.nvm/... copy if that's where we resolved from)
     {
       check_canceled(&cancel)?;
-      let mut removed = cleanup_mac_nvm_openclaw(&openclaw_cmd, "openclaw").unwrap_or_default();
-      removed.extend(cleanup_all_mac_nvm_openclaw("openclaw").unwrap_or_default());
+      let mut removed = cleanup_mac_nvm_openclaw(&openclaw_cmd, OPENCLAW_NPM_PACKAGE).unwrap_or_default();
+      removed.extend(cleanup_all_mac_nvm_openclaw(OPENCLAW_NPM_PACKAGE).unwrap_or_default());
       if !removed.is_empty() {
         emit_log(&window, "install-log", format!("[cleanup] nvm: removed {} item(s)", removed.len()));
         for item in removed {
@@ -308,7 +345,72 @@ pub async fn uninstall_openclaw(window: Window, state: tauri::State<'_, TaskStat
       }
     }
 
-    emit_log(&window, "install-log", "卸载完成。");
+    // 3) Verify CLI is gone; otherwise try Windows shim removal (common with nvm-windows).
+    check_canceled(&cancel)?;
+    if let Some(still) = resolve_openclaw() {
+      emit_log(
+        &window,
+        "install-log",
+        format!(
+          "[cleanup] openclaw 仍存在：{} ({})",
+          still.command.to_string_lossy(),
+          still.source
+        ),
+      );
+
+      #[cfg(target_os = "windows")]
+      {
+        let still_dir = still.command.parent().map(|p| p.to_path_buf());
+        if let Some(dir) = still_dir {
+          // Try again with npm.cmd next to the shim (common for nvm4w symlink dir).
+          let npm_local = dir.join("npm.cmd");
+          if npm_local.is_file() {
+            let npm_local = npm_local.to_string_lossy().to_string();
+            emit_log(&window, "install-log", format!("[cleanup] retry npm: {npm_local}"));
+            run_best_effort("[npm]", &npm_local, &["uninstall", "-g", OPENCLAW_NPM_PACKAGE])?;
+          }
+
+          let shim_names = ["openclaw.cmd", "openclaw", "openclaw.ps1"];
+          let mut removed: Vec<String> = Vec::new();
+          for name in shim_names {
+            check_canceled(&cancel)?;
+            let target = dir.join(name);
+            if !target.is_file() {
+              continue;
+            }
+            match fs::remove_file(&target) {
+              Ok(()) => {
+                removed.push(target.to_string_lossy().to_string());
+              }
+              Err(err) => {
+                emit_log(
+                  &window,
+                  "install-log",
+                  format!("[cleanup] failed to remove shim {}: {}", target.to_string_lossy(), err),
+                );
+              }
+            }
+          }
+          if !removed.is_empty() {
+            emit_log(&window, "install-log", format!("[cleanup] removed {} shim(s)", removed.len()));
+            for item in removed {
+              emit_log(&window, "install-log", format!("[cleanup] shim: {item}"));
+            }
+          }
+        }
+      }
+
+      check_canceled(&cancel)?;
+      if let Some(still2) = resolve_openclaw() {
+        return Err(format!(
+          "已执行卸载，但系统中仍能找到 openclaw：{}（{}）。\n可能原因：权限不足/多个 Node 环境。\n建议：在终端运行 `npm uninstall -g {OPENCLAW_NPM_PACKAGE}`（必要时以管理员权限），然后重启终端再试。",
+          still2.command.to_string_lossy(),
+          still2.source
+        ));
+      }
+    }
+
+    emit_log(&window, "install-log", "卸载完成：已找不到 openclaw 命令。");
     Ok(())
   })();
 

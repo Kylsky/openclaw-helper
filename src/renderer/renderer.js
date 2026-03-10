@@ -381,7 +381,7 @@ if (uninstallBtn) {
     appendLog("[ui] 点击卸载");
     const confirmed = await confirmModal({
       title: "确认卸载",
-      body: "将执行 openclaw 卸载（service/state/workspace），并尝试自动移除 CLI（brew / npm / pnpm / nvm）。是否继续？",
+      body: "将执行 openclaw 卸载（service/state/workspace），并尝试自动移除 CLI（brew / npm / pnpm / nvm；Windows: nvm-windows / npm shim）。是否继续？",
       confirmText: "继续卸载",
       cancelText: "取消"
     });
