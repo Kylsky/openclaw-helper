@@ -42,6 +42,78 @@ fn emit_log(window: &Window, event: &str, message: impl Into<String>) {
   let _ = window.emit(event, payload);
 }
 
+#[cfg(target_os = "windows")]
+fn is_windows_admin(path_env: &str) -> bool {
+  // Best-effort: `net session` succeeds only when elevated (Admin).
+  // It may fail for other reasons, so treat failures as "not admin".
+  let Ok(mut cmd) = create_command(path_env, "net", &["session"]) else {
+    return false;
+  };
+  cmd.stdout(std::process::Stdio::null());
+  cmd.stderr(std::process::Stdio::null());
+  cmd.status().map(|s| s.success()).unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_escape_single_quoted(value: &str) -> String {
+  value.replace('\'', "''")
+}
+
+#[cfg(target_os = "windows")]
+fn run_openclaw_elevated(
+  window: &Window,
+  cancel: &Arc<AtomicBool>,
+  resolved: &crate::openclaw::ResolvedOpenclaw,
+  args: &[&str],
+) -> Result<i32, String> {
+  check_canceled(cancel)?;
+  let openclaw_path = resolved.command.to_string_lossy().to_string();
+  let openclaw_path_escaped = powershell_escape_single_quoted(&openclaw_path);
+
+  let is_cmd = resolved
+    .command
+    .extension()
+    .and_then(|e| e.to_str())
+    .map(|e| matches!(e.to_ascii_lowercase().as_str(), "cmd" | "bat"))
+    .unwrap_or(false);
+
+  let arg_list: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+  let arg_list_ps = arg_list
+    .iter()
+    .map(|a| format!("'{}'", powershell_escape_single_quoted(a)))
+    .collect::<Vec<_>>()
+    .join(", ");
+
+  // Note: Output from the elevated OpenClaw process won't be streamed back here.
+  // We'll just wait for completion and return the exit code.
+  let script = if is_cmd {
+    let cmdline = format!(
+      "\"\"{}\" {}\"",
+      openclaw_path_escaped,
+      args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(" ")
+    );
+    format!(
+      "$ErrorActionPreference='Stop';\n\
+       $command='{cmdline}';\n\
+       $p=Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/s','/c',$command) -Verb RunAs -PassThru -Wait -WindowStyle Hidden;\n\
+       exit $p.ExitCode\n"
+    )
+  } else {
+    format!(
+      "$ErrorActionPreference='Stop';\n\
+       $p=Start-Process -FilePath '{openclaw_path_escaped}' -ArgumentList @({arg_list_ps}) -Verb RunAs -PassThru -Wait -WindowStyle Hidden;\n\
+       exit $p.ExitCode\n"
+    )
+  };
+
+  let mut ps = Command::new("powershell");
+  apply_windows_no_window(&mut ps);
+  ps.env("PATH", &resolved.path_env);
+  ps.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script]);
+
+  run_logged(window, cancel, "[powershell]", ps)
+}
+
 fn emit_progress(window: &Window, stage: &str, title: &str, index: u32, total: u32) {
   let total_f = total.max(1) as f32;
   let percent = ((index.saturating_sub(1)) as f32 / total_f).clamp(0.0, 1.0);
@@ -141,6 +213,26 @@ pub async fn run_openclaw(window: Window, state: tauri::State<'_, TaskState>, ar
     let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
 
     emit_log(&w2, "openclaw-log", format!("openclaw {} ({})", args.join(" "), resolved.source));
+
+    // Windows: installing the gateway service needs admin privileges (schtasks create).
+    // If user isn't elevated, run `openclaw gateway install` via UAC so "Start" works in-app.
+    #[cfg(target_os = "windows")]
+    {
+      let is_gateway_install = args.len() >= 2 && args[0] == "gateway" && args[1] == "install";
+      if is_gateway_install && !is_windows_admin(&resolved.path_env) {
+        emit_log(
+          &w2,
+          "openclaw-log",
+          "[tip] 安装网关服务需要管理员权限，将弹出 UAC 授权窗口（点“是”继续）。",
+        );
+        let code = run_openclaw_elevated(&w2, &cancel2, &resolved, &["--no-color", "gateway", "install"])?;
+        if code == 0 {
+          emit_log(&w2, "openclaw-log", "[gateway] install: ok");
+          return Ok(());
+        }
+        return Err(format!("gateway install 失败（退出码 {code}）"));
+      }
+    }
 
     let mut cmd = Command::new(&resolved.command);
     apply_windows_no_window(&mut cmd);
@@ -1309,11 +1401,20 @@ fn start_install_blocking(window: &Window, cancel: &Arc<AtomicBool>, options: In
     let mut cmd = Command::new(&resolved.command);
     apply_windows_no_window(&mut cmd);
     cmd.env("PATH", &resolved.path_env);
+    cmd.args(["onboard", "--non-interactive", "--accept-risk"]);
+    #[cfg(not(target_os = "windows"))]
+    {
+      cmd.arg("--install-daemon");
+    }
+    #[cfg(target_os = "windows")]
+    {
+      emit_log(
+        window,
+        "install-log",
+        "[tip] Windows 上安装网关服务需要管理员权限；已跳过 daemon 安装。稍后可在“网关服务 → 启动”触发安装。",
+      );
+    }
     cmd.args([
-      "onboard",
-      "--non-interactive",
-      "--accept-risk",
-      "--install-daemon",
       "--skip-ui",
       "--skip-health",
       "--skip-skills",
