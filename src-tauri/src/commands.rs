@@ -1402,17 +1402,21 @@ fn start_install_blocking(window: &Window, cancel: &Arc<AtomicBool>, options: In
     apply_windows_no_window(&mut cmd);
     cmd.env("PATH", &resolved.path_env);
     cmd.args(["onboard", "--non-interactive", "--accept-risk"]);
+    #[cfg(target_os = "windows")]
+    {
+      if is_windows_admin(&resolved.path_env) {
+        cmd.arg("--install-daemon");
+      } else {
+        emit_log(
+          window,
+          "install-log",
+          "[tip] Windows 上安装网关服务需要管理员权限；当前未以管理员运行，已跳过 daemon 安装。稍后可在“网关服务 → 启动”触发安装。",
+        );
+      }
+    }
     #[cfg(not(target_os = "windows"))]
     {
       cmd.arg("--install-daemon");
-    }
-    #[cfg(target_os = "windows")]
-    {
-      emit_log(
-        window,
-        "install-log",
-        "[tip] Windows 上安装网关服务需要管理员权限；已跳过 daemon 安装。稍后可在“网关服务 → 启动”触发安装。",
-      );
     }
     cmd.args([
       "--skip-ui",
