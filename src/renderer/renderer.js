@@ -65,6 +65,9 @@ const updateBtn = el("updateBtn");
 const updateChannel = el("updateChannel");
 const uninstallBtn = el("uninstallBtn");
 
+const operationOverlay = el("operationOverlay");
+const operationTitle = el("operationTitle");
+const operationCloseBtn = el("operationCloseBtn");
 const modalOverlay = el("modalOverlay");
 const modalTitle = el("modalTitle");
 const modalBody = el("modalBody");
@@ -136,6 +139,29 @@ function confirmModal({ title, body, confirmText = "确定", cancelText = "取�
       // ignore
     }
   });
+}
+
+function isOperationModalOpen() {
+  return Boolean(operationOverlay && !operationOverlay.classList.contains("hidden"));
+}
+
+function updateOperationModalAvailability() {
+  if (!operationCloseBtn) return;
+  operationCloseBtn.disabled = taskRunning;
+  operationCloseBtn.title = taskRunning ? "任务执行中，暂不可关闭" : "";
+}
+
+function showOperationModal(title = "执行详情") {
+  if (!operationOverlay || !operationTitle) return;
+  operationTitle.textContent = String(title ?? "执行详情");
+  operationOverlay.classList.remove("hidden");
+  updateOperationModalAvailability();
+  updateLogVisibility();
+}
+
+function hideOperationModal() {
+  if (!operationOverlay || taskRunning) return;
+  operationOverlay.classList.add("hidden");
 }
 
 function applyGatewayActionAvailability() {
@@ -450,6 +476,7 @@ async function runWorkspaceMarkdownSaveSequence(changes, { stageLabel } = {}) {
   const list = Array.isArray(changes) ? changes.filter(Boolean) : [];
   if (list.length === 0) return true;
 
+  showOperationModal(stageLabel || "保存 Workspace Markdown…");
   setTaskRunning(true);
   setStage(stageLabel || "保存 Workspace Markdown…");
   setProgress(0.05);
@@ -677,6 +704,7 @@ function setTaskRunning(value) {
   installBtn.disabled = value;
   cancelBtn.disabled = !value;
   stopBtn.disabled = !value;
+  updateOperationModalAvailability();
 
   applyGatewayActionAvailability();
   doctorBtn.disabled = value;
@@ -863,6 +891,7 @@ async function checkAndRoute() {
 
 async function runOpenclaw(args, { stageLabel }) {
   if (taskRunning) return;
+  showOperationModal(stageLabel || "执行中…");
   setTaskRunning(true);
   logEl.textContent = "";
   setStage(stageLabel || "执行中…");
@@ -890,6 +919,7 @@ async function runOpenclawSequence(steps, { stageLabel }) {
   const list = Array.isArray(steps) ? steps.filter(Boolean) : [];
   if (list.length === 0) return false;
 
+  showOperationModal(stageLabel || "执行中…");
   setTaskRunning(true);
   logEl.textContent = "";
   setStage(stageLabel || "执行中…");
@@ -923,6 +953,23 @@ async function runOpenclawSequence(steps, { stageLabel }) {
 }
 
 showLogsCheckbox.addEventListener("change", () => updateLogVisibility());
+
+if (operationCloseBtn) {
+  operationCloseBtn.addEventListener("click", () => hideOperationModal());
+}
+
+if (operationOverlay) {
+  operationOverlay.addEventListener("click", (event) => {
+    if (event.target === operationOverlay) hideOperationModal();
+  });
+}
+
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!isOperationModalOpen()) return;
+  if (modalOverlay && !modalOverlay.classList.contains("hidden")) return;
+  hideOperationModal();
+});
 
 if (cfgDefaultModel) {
   cfgDefaultModel.addEventListener("input", () => updateProviderPreview());
@@ -958,6 +1005,7 @@ if (workspaceMarkdownCollapseBtn) {
 
 const requestCancelTask = async () => {
   if (!taskRunning) return;
+  showOperationModal("取消当前任务…");
   showLogsCheckbox.checked = true;
   updateLogVisibility();
   appendLog("[ui] 请求取消任务…");
@@ -974,6 +1022,7 @@ cancelBtn.addEventListener("click", requestCancelTask);
 
 installBtn.addEventListener("click", async () => {
   if (taskRunning) return;
+  showOperationModal("安装 OpenClaw…");
   setTaskRunning(true);
   logEl.textContent = "";
   setStage("安装中…");
@@ -1016,6 +1065,7 @@ openDashboardBtn.addEventListener("click", async () => {
     // Always use `openclaw dashboard --no-open` because it appends the token to the URL.
     await installer.openDashboard();
   } catch (error) {
+    showOperationModal("打开 Dashboard…");
     appendLog(`[错误] ${error?.message || String(error)}`);
     showLogsCheckbox.checked = true;
     updateLogVisibility();
@@ -1045,6 +1095,7 @@ if (configCancelBtn) {
 if (configSaveBtn) {
   configSaveBtn.addEventListener("click", async () => {
     if (taskRunning) return;
+    showOperationModal("保存配置…");
     logEl.textContent = "";
     showLogsCheckbox.checked = true;
     updateLogVisibility();
@@ -1379,6 +1430,7 @@ if (uninstallBtn) {
       return;
     }
 
+    showOperationModal("卸载 OpenClaw…");
     setTaskRunning(true);
     logEl.textContent = "";
     appendLog("[ui] 开始卸载…");

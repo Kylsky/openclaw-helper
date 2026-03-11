@@ -302,30 +302,43 @@
       </datalist>
     </section>
 
-    <section class="card">
-      <div class="row progressRow">
-        <h2 style="margin: 0">进度</h2>
-        <label class="toggle inline" style="margin-left: auto">
-          <input id="showLogs" type="checkbox" checked />
-          显示日志
-        </label>
-      </div>
-      <div id="stageText" class="stage" style="margin-top: 12px">等待开始…</div>
-      <div class="progress">
-        <div id="progressBar" class="progressBar" style="width: 0%"></div>
-      </div>
-      <div class="row progressRow" style="margin-top: 8px">
-        <div id="progressText" class="progressText" style="margin: 0">0%</div>
-        <button id="stopBtn" class="secondary" style="padding: 6px 14px; font-size: 13px" type="button" disabled>
-          取消当前任务
+  </div>
+
+  <div id="operationOverlay" class="modalOverlay hidden" role="dialog" aria-modal="true" aria-labelledby="operationTitle">
+    <div class="modal operationModal">
+      <div class="operationModalHeader">
+        <div id="operationTitle" class="modalTitle operationModalTitle">执行详情</div>
+        <button id="operationCloseBtn" class="secondary operationCloseBtn" type="button" aria-label="关闭执行详情">
+          关闭
         </button>
       </div>
-    </section>
+      <div class="operationModalContent">
+        <section class="operationSection">
+          <div class="row progressRow operationProgressHeader">
+            <h2 style="margin: 0">进度</h2>
+            <label class="toggle inline" style="margin-left: auto">
+              <input id="showLogs" type="checkbox" checked />
+              显示日志
+            </label>
+          </div>
+          <div id="stageText" class="stage" style="margin-top: 12px">等待开始…</div>
+          <div class="progress">
+            <div id="progressBar" class="progressBar" style="width: 0%"></div>
+          </div>
+          <div class="row progressRow" style="margin-top: 8px">
+            <div id="progressText" class="progressText" style="margin: 0">0%</div>
+            <button id="stopBtn" class="secondary" style="padding: 6px 14px; font-size: 13px" type="button" disabled>
+              取消当前任务
+            </button>
+          </div>
+        </section>
 
-    <section id="logCard" class="card hidden">
-      <h2>日志</h2>
-      <div id="log" class="log logHtml" role="log" aria-live="polite"></div>
-    </section>
+        <section id="logCard" class="operationSection hidden">
+          <h2 style="margin-top: 0">日志</h2>
+          <div id="log" class="log logHtml" role="log" aria-live="polite"></div>
+        </section>
+      </div>
+    </div>
   </div>
 
   <div id="modalOverlay" class="modalOverlay hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">

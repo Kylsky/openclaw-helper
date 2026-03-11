@@ -333,6 +333,58 @@ button:disabled {
   border: 1px solid var(--border);
 }
 
+.operationModal {
+  width: min(760px, 100%);
+  max-height: min(88vh, 900px);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.operationModalHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.operationModalTitle {
+  margin: 0;
+  text-align: left;
+}
+
+.operationCloseBtn {
+  flex: none;
+  min-width: 88px;
+}
+
+.operationModalContent {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 24px 24px;
+  overflow: auto;
+}
+
+.operationSection {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px;
+}
+
+.operationProgressHeader {
+  margin-top: 0;
+}
+
+.operationModal .log {
+  height: min(42vh, 360px);
+  background: rgba(0, 0, 0, 0.12);
+}
+
 .modalTitle {
   font-size: 18px;
   font-weight: 600;
@@ -661,6 +713,21 @@ input[readonly] {
 }
 
 @media (max-width: 768px) {
+  .operationModalHeader,
+  .operationModalContent {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .operationModalHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .operationCloseBtn {
+    width: 100%;
+  }
+
   .app {
     padding: 20px 16px;
   }
