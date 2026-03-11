@@ -1251,7 +1251,10 @@ fn redact_sensitive_args(args: &[String]) -> String {
   out.join(" ")
 }
 
-fn parse_provider_id_from_config_value(value: &serde_json::Value) -> Option<String> {
+const OPENAI_RESPONSES_CONTEXT_WINDOW: u64 = 320_000;
+const OPENAI_RESPONSES_MAX_TOKENS: u64 = 81_920;
+
+fn parse_primary_model_ref_from_config_value(value: &serde_json::Value) -> Option<(String, String)> {
   let primary = match value {
     serde_json::Value::String(s) => Some(s.as_str()),
     serde_json::Value::Object(obj) => obj.get("primary").and_then(|v| v.as_str()),
@@ -1261,11 +1264,72 @@ fn parse_provider_id_from_config_value(value: &serde_json::Value) -> Option<Stri
   if trimmed.is_empty() {
     return None;
   }
-  let provider = trimmed.split('/').next()?.trim();
-  if provider.is_empty() {
+  let mut parts = trimmed.splitn(2, '/');
+  let provider = parts.next()?.trim();
+  let model_id = parts.next()?.trim();
+  if provider.is_empty() || model_id.is_empty() {
     return None;
   }
-  Some(provider.to_string())
+  Some((provider.to_string(), model_id.to_string()))
+}
+
+fn openclaw_command_error(output: &std::process::Output) -> String {
+  let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+  if !stderr.is_empty() {
+    return stderr;
+  }
+
+  let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+  if !stdout.is_empty() {
+    return stdout;
+  }
+
+  format!("退出码 {:?}", output.status.code())
+}
+
+fn run_openclaw_config_get_json(
+  resolved: &crate::openclaw::ResolvedOpenclaw,
+  path: &str,
+) -> Result<serde_json::Value, String> {
+  let mut cmd = Command::new(&resolved.command);
+  apply_windows_no_window(&mut cmd);
+  cmd.env("PATH", &resolved.path_env);
+  cmd.args(["config", "get", path, "--json"]);
+  let out = cmd.output().map_err(|e| e.to_string())?;
+  if !out.status.success() {
+    return Err(format!("读取配置 {path} 失败：{}", openclaw_command_error(&out)));
+  }
+
+  let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+  serde_json::from_str(&stdout).map_err(|e| format!("解析配置 {path} 失败：{e}"))
+}
+
+fn run_openclaw_config_set(
+  window: &Window,
+  cancel: &Arc<AtomicBool>,
+  resolved: &crate::openclaw::ResolvedOpenclaw,
+  path: &str,
+  value: &str,
+  strict_json: bool,
+) -> Result<(), String> {
+  check_canceled(cancel)?;
+  emit_log(window, "install-log", format!("[config] set {path} = {value}"));
+
+  let mut cmd = Command::new(&resolved.command);
+  apply_windows_no_window(&mut cmd);
+  cmd.env("PATH", &resolved.path_env);
+  cmd.arg("config").arg("set");
+  if strict_json {
+    cmd.arg("--strict-json");
+  }
+  cmd.arg(path).arg(value);
+
+  let out = cmd.output().map_err(|e| e.to_string())?;
+  if !out.status.success() {
+    return Err(format!("写入配置 {path} 失败：{}", openclaw_command_error(&out)));
+  }
+
+  Ok(())
 }
 
 fn run_openclaw_collect(
@@ -1284,6 +1348,7 @@ fn run_openclaw_collect(
   ))
 }
 
+#[cfg(target_os = "windows")]
 fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
   let pretty = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
   let dir = path.parent().ok_or("invalid config path")?;
@@ -1318,35 +1383,6 @@ fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), Strin
   Ok(())
 }
 
-fn expand_user_path(raw: &str) -> PathBuf {
-  let trimmed = raw.trim();
-  if trimmed.is_empty() {
-    return PathBuf::new();
-  }
-
-  let trimmed = trimmed.trim_matches(|c| c == '"' || c == '\'');
-
-  if trimmed == "~" {
-    if let Some(home) = crate::openclaw::home_dir() {
-      return home;
-    };
-  }
-
-  if let Some(rest) = trimmed.strip_prefix("~/") {
-    if let Some(home) = crate::openclaw::home_dir() {
-      return home.join(rest);
-    };
-  }
-
-  if let Some(rest) = trimmed.strip_prefix("~\\") {
-    if let Some(home) = crate::openclaw::home_dir() {
-      return home.join(rest);
-    };
-  }
-
-  PathBuf::from(trimmed)
-}
-
 fn set_openai_api_mode_openai_responses(
   window: &Window,
   cancel: &Arc<AtomicBool>,
@@ -1355,69 +1391,51 @@ fn set_openai_api_mode_openai_responses(
   check_canceled(cancel)?;
   emit_log(window, "install-log", "[config] 设置 api=openai-responses…");
 
-  // 1) Find the active config file path via CLI to avoid guessing.
-  let config_file_out = run_openclaw_collect(resolved, &["config", "file"])?;
-  let config_file = split_lines(&config_file_out)
-    .into_iter()
-    .next()
-    .ok_or("未能获取 openclaw config file 路径")?;
-  let config_path = expand_user_path(config_file.trim());
-  if config_path.as_os_str().is_empty() {
-    return Err("openclaw config file 返回空路径".into());
-  }
-  emit_log(
-    window,
-    "install-log",
-    format!("[config] file: {}", config_path.to_string_lossy()),
-  );
-
-  // 2) Read JSON.
-  let raw = std::fs::read_to_string(&config_path).map_err(|e| {
-    format!(
-      "{} (path: {})",
-      e.to_string(),
-      config_path.to_string_lossy()
-    )
-  })?;
-  let mut json: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-
-  // 3) Determine provider id from agents.defaults.model.
-  let model_value = json
-    .pointer("/agents/defaults/model")
-    .ok_or("config 缺少 agents.defaults.model")?
-    .clone();
-  let provider_id = parse_provider_id_from_config_value(&model_value).ok_or("无法从 agents.defaults.model 推断 provider id")?;
+  let model_value = run_openclaw_config_get_json(resolved, "agents.defaults.model")?;
+  let (provider_id, model_id) = parse_primary_model_ref_from_config_value(&model_value)
+    .ok_or("无法从 agents.defaults.model 推断 provider/model id")?;
   emit_log(window, "install-log", format!("[config] provider: {provider_id}"));
+  emit_log(window, "install-log", format!("[config] model: {model_id}"));
 
-  // 4) Set models.providers.<providerId>.api = openai-responses.
-  let providers = json
-    .pointer_mut("/models/providers")
-    .and_then(|v| v.as_object_mut());
-  let providers = match providers {
-    Some(p) => p,
-    None => {
-      // Ensure objects exist.
-      if !json.get("models").is_some() {
-        json["models"] = serde_json::json!({});
-      }
-      if !json["models"].get("providers").is_some() {
-        json["models"]["providers"] = serde_json::json!({});
-      }
-      json["models"]["providers"].as_object_mut().ok_or("无法创建 models.providers")?
-    }
-  };
+  let provider_api_path = format!("models.providers.{provider_id}.api");
+  run_openclaw_config_set(window, cancel, resolved, &provider_api_path, "openai-responses", false)?;
 
-  if !providers.contains_key(&provider_id) {
-    providers.insert(provider_id.clone(), serde_json::json!({}));
-  }
+  let provider_models_path = format!("models.providers.{provider_id}.models");
+  let models_value = run_openclaw_config_get_json(resolved, &provider_models_path)?;
+  let models = models_value
+    .as_array()
+    .ok_or("models.providers.<provider>.models 不是数组")?;
+  let model_index = models
+    .iter()
+    .position(|model| {
+      model
+        .get("id")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim() == model_id)
+        .unwrap_or(false)
+    })
+    .ok_or_else(|| format!("未在 {provider_models_path} 中找到 model={model_id}"))?;
 
-  let provider_obj = providers
-    .get_mut(&provider_id)
-    .and_then(|v| v.as_object_mut())
-    .ok_or("models.providers.<provider> 不是对象")?;
-  provider_obj.insert("api".into(), serde_json::Value::String("openai-responses".into()));
+  let context_window_path = format!("models.providers.{provider_id}.models[{model_index}].contextWindow");
+  run_openclaw_config_set(
+    window,
+    cancel,
+    resolved,
+    &context_window_path,
+    &OPENAI_RESPONSES_CONTEXT_WINDOW.to_string(),
+    true,
+  )?;
 
-  atomic_write_json(&config_path, &json)?;
+  let max_tokens_path = format!("models.providers.{provider_id}.models[{model_index}].maxTokens");
+  run_openclaw_config_set(
+    window,
+    cancel,
+    resolved,
+    &max_tokens_path,
+    &OPENAI_RESPONSES_MAX_TOKENS.to_string(),
+    true,
+  )?;
+
   emit_log(window, "install-log", "[config] ok");
   Ok(())
 }
