@@ -35,8 +35,27 @@ const gatewayRestartBtn = el("gatewayRestartBtn");
 const configCancelBtn = el("configCancelBtn");
 const configSaveBtn = el("configSaveBtn");
 const cfgDefaultModel = el("cfgDefaultModel");
+const cfgProviderId = el("cfgProviderId");
+const cfgProviderApi = el("cfgProviderApi");
 const cfgBaseUrl = el("cfgBaseUrl");
 const cfgApiKey = el("cfgApiKey");
+const cfgContextWindow = el("cfgContextWindow");
+const cfgMaxTokens = el("cfgMaxTokens");
+const cfgWorkspace = el("cfgWorkspace");
+const cfgMaxConcurrent = el("cfgMaxConcurrent");
+const cfgSubagentsMaxConcurrent = el("cfgSubagentsMaxConcurrent");
+const cfgCompactionMode = el("cfgCompactionMode");
+const cfgGatewayMode = el("cfgGatewayMode");
+const cfgGatewayBind = el("cfgGatewayBind");
+const cfgGatewayPort = el("cfgGatewayPort");
+const cfgGatewayAuthMode = el("cfgGatewayAuthMode");
+const cfgGatewayCustomBindHostField = el("cfgGatewayCustomBindHostField");
+const cfgGatewayCustomBindHost = el("cfgGatewayCustomBindHost");
+const cfgGatewayAuthTokenField = el("cfgGatewayAuthTokenField");
+const cfgGatewayAuthToken = el("cfgGatewayAuthToken");
+const cfgGatewayAuthPasswordField = el("cfgGatewayAuthPasswordField");
+const cfgGatewayAuthPassword = el("cfgGatewayAuthPassword");
+const cfgDefaultModelPresets = el("cfgDefaultModelPresets");
 
 const doctorBtn = el("doctorBtn");
 const updateBtn = el("updateBtn");
@@ -48,9 +67,13 @@ const modalTitle = el("modalTitle");
 const modalBody = el("modalBody");
 const modalCancelBtn = el("modalCancelBtn");
 const modalConfirmBtn = el("modalConfirmBtn");
+const configInputs = Array.from(document.querySelectorAll("#configCard input, #configCard select, #configCard textarea"));
 
 let taskRunning = false;
 let cachedGatewayState = "unknown";
+let loadedConfigValues = {};
+let loadedProviderContext = { providerId: "", modelId: "", modelIndex: -1 };
+let loadedProviderCatalog = {};
 
 function confirmModal({ title, body, confirmText = "确定", cancelText = "取消" }) {
   return new Promise((resolve) => {
@@ -188,6 +211,236 @@ function updateLogVisibility() {
   }
 }
 
+function getInputValue(input) {
+  return input?.value ? String(input.value).trim() : "";
+}
+
+function setInputValue(input, value) {
+  if (!input) return;
+  const nextValue = value === undefined || value === null ? "" : String(value);
+
+  if (input instanceof HTMLSelectElement && nextValue) {
+    const exists = Array.from(input.options).some((option) => option.value === nextValue);
+    if (!exists) {
+      const dynamicOption = document.createElement("option");
+      dynamicOption.value = nextValue;
+      dynamicOption.textContent = `${nextValue}（当前值）`;
+      dynamicOption.dataset.dynamic = "true";
+      input.append(dynamicOption);
+    }
+  }
+
+  input.value = nextValue;
+}
+
+function setDatalistOptions(datalist, values) {
+  if (!(datalist instanceof HTMLDataListElement)) return;
+  const uniqueValues = Array.from(new Set((values || []).map((value) => String(value ?? "").trim()).filter(Boolean)));
+  datalist.replaceChildren(
+    ...uniqueValues.map((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      return option;
+    })
+  );
+}
+
+function parseJsonOutput(raw) {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+async function readConfigJson(path) {
+  try {
+    const raw = await installer.execOpenclawCollect(["config", "get", path, "--json"]);
+    return parseJsonOutput(raw);
+  } catch {
+    return null;
+  }
+}
+
+function getPrimaryModelRef(value) {
+  if (typeof value === "string") return value.trim();
+  if (value && typeof value === "object" && typeof value.primary === "string") {
+    return value.primary.trim();
+  }
+  return "";
+}
+
+function parseModelRef(modelRef) {
+  const text = String(modelRef ?? "").trim();
+  const slashIndex = text.indexOf("/");
+  if (slashIndex <= 0 || slashIndex >= text.length - 1) {
+    return { providerId: "", modelId: "" };
+  }
+
+  return {
+    providerId: text.slice(0, slashIndex).trim(),
+    modelId: text.slice(slashIndex + 1).trim()
+  };
+}
+
+async function resolveProviderContext(modelRef) {
+  const { providerId, modelId } = parseModelRef(modelRef);
+  const context = {
+    providerId,
+    modelId,
+    modelIndex: -1,
+    providerApi: "",
+    baseUrl: "",
+    hasApiKey: false,
+    contextWindow: "",
+    maxTokens: ""
+  };
+
+  if (!providerId) return context;
+
+  const provider = await readConfigJson(`models.providers.${providerId}`);
+  if (!provider || typeof provider !== "object") return context;
+
+  if (typeof provider.api === "string") context.providerApi = provider.api;
+  if (typeof provider.baseUrl === "string") context.baseUrl = provider.baseUrl;
+  context.hasApiKey = typeof provider.apiKey === "string" && provider.apiKey.trim().length > 0;
+
+  const models = Array.isArray(provider.models) ? provider.models : [];
+  const modelIndex = models.findIndex((item) => item && typeof item.id === "string" && item.id.trim() === modelId);
+  if (modelIndex >= 0) {
+    context.modelIndex = modelIndex;
+    const model = models[modelIndex] || {};
+    if (model.contextWindow !== undefined && model.contextWindow !== null) {
+      context.contextWindow = String(model.contextWindow);
+    }
+    if (model.maxTokens !== undefined && model.maxTokens !== null) {
+      context.maxTokens = String(model.maxTokens);
+    }
+  }
+
+  return context;
+}
+
+function updateProviderPreview() {
+  const { providerId } = parseModelRef(getInputValue(cfgDefaultModel));
+  setInputValue(cfgProviderId, providerId || loadedProviderContext.providerId || "");
+}
+
+function buildModelPresetValues(providers) {
+  if (!providers || typeof providers !== "object") return [];
+
+  return Object.entries(providers).flatMap(([providerId, provider]) => {
+    const models = Array.isArray(provider?.models) ? provider.models : [];
+    return models
+      .map((model) => {
+        const modelId = typeof model?.id === "string" ? model.id.trim() : "";
+        if (!modelId) return "";
+        return `${providerId}/${modelId}`;
+      })
+      .filter(Boolean);
+  });
+}
+
+function refreshConfigPresetLists() {
+  const defaultModelValues = buildModelPresetValues(loadedProviderCatalog);
+  if (loadedConfigValues.defaultModel) defaultModelValues.unshift(loadedConfigValues.defaultModel);
+  setDatalistOptions(cfgDefaultModelPresets, defaultModelValues);
+}
+
+function updateGatewayBindVisibility() {
+  const isCustomBind = getInputValue(cfgGatewayBind) === "custom";
+  if (cfgGatewayCustomBindHostField) {
+    cfgGatewayCustomBindHostField.classList.toggle("hidden", !isCustomBind);
+  }
+  if (cfgGatewayCustomBindHost) {
+    cfgGatewayCustomBindHost.disabled = taskRunning || !isCustomBind;
+  }
+}
+
+function updateGatewayAuthVisibility() {
+  const authMode = getInputValue(cfgGatewayAuthMode);
+  const useToken = authMode === "token" || !authMode;
+  const usePassword = authMode === "password";
+
+  if (cfgGatewayAuthTokenField) {
+    cfgGatewayAuthTokenField.classList.toggle("hidden", !useToken);
+  }
+  if (cfgGatewayAuthPasswordField) {
+    cfgGatewayAuthPasswordField.classList.toggle("hidden", !usePassword);
+  }
+  if (cfgGatewayAuthToken) {
+    cfgGatewayAuthToken.disabled = taskRunning || !useToken;
+  }
+  if (cfgGatewayAuthPassword) {
+    cfgGatewayAuthPassword.disabled = taskRunning || !usePassword;
+  }
+}
+
+function setSecretPlaceholder(input, configuredText, emptyText, hasConfiguredValue) {
+  if (!input) return;
+  input.placeholder = hasConfiguredValue ? configuredText : emptyText;
+}
+
+function resetConfigInputs() {
+  configInputs.forEach((input) => {
+    if (input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement || input instanceof HTMLSelectElement) {
+      input.value = "";
+    }
+  });
+}
+
+function queueTextConfigSet(seq, { label, path, value, currentValue = "", stageLabel, strictJson = false, secret = false }) {
+  const nextValue = String(value ?? "").trim();
+  const prevValue = String(currentValue ?? "").trim();
+
+  if (secret) {
+    if (!nextValue) return;
+  } else if (!nextValue || nextValue === prevValue) {
+    return;
+  }
+
+  seq.push({
+    args: strictJson
+      ? ["config", "set", "--strict-json", path, JSON.stringify(nextValue)]
+      : ["config", "set", path, nextValue],
+    stageLabel,
+    logLine: `[config] 更新${label}...`
+  });
+}
+
+function parsePositiveInteger(rawValue, label, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const text = String(rawValue ?? "").trim();
+  if (!text) return { empty: true };
+  if (!/^\d+$/.test(text)) {
+    return { error: `${label} 必须是正整数。` };
+  }
+
+  const value = Number.parseInt(text, 10);
+  if (value < min || value > max) {
+    return { error: `${label} 必须在 ${min} - ${max} 之间。` };
+  }
+
+  return { value };
+}
+
+function queueIntegerConfigSet(seq, { label, path, rawValue, currentValue = "", stageLabel, min = 1, max = Number.MAX_SAFE_INTEGER }) {
+  const parsed = parsePositiveInteger(rawValue, label, { min, max });
+  if (parsed.error) throw new Error(parsed.error);
+  if (parsed.empty) return;
+
+  const nextValue = parsed.value;
+  if (String(nextValue) === String(currentValue ?? "")) return;
+
+  seq.push({
+    args: ["config", "set", "--strict-json", path, JSON.stringify(nextValue)],
+    stageLabel,
+    logLine: `[config] 更新${label}...`
+  });
+}
+
 function setTaskRunning(value) {
   taskRunning = value;
   installBtn.disabled = value;
@@ -199,8 +452,15 @@ function setTaskRunning(value) {
   updateBtn.disabled = value;
   if (uninstallBtn) uninstallBtn.disabled = value;
   if (configSaveBtn) configSaveBtn.disabled = value;
+  if (configCancelBtn) configCancelBtn.disabled = value;
   if (openConfigBtn) openConfigBtn.disabled = value;
   refreshBtn.disabled = value;
+  configInputs.forEach((input) => {
+    if (input.id === "cfgProviderId") return;
+    input.disabled = value;
+  });
+  updateGatewayBindVisibility();
+  updateGatewayAuthVisibility();
 }
 
 function showInstaller() {
@@ -250,26 +510,99 @@ async function refreshGatewayStatus() {
 
 async function loadConfigValues() {
   if (!cfgBaseUrl || !cfgDefaultModel) return;
-  cfgDefaultModel.value = "";
-  cfgBaseUrl.value = "";
-  cfgApiKey.value = "";
+
+  resetConfigInputs();
+  loadedConfigValues = {};
+  loadedProviderContext = { providerId: "", modelId: "", modelIndex: -1 };
+  loadedProviderCatalog = {};
 
   setStage("读取配置中…");
-  try {
-    const rawUrl = await installer.execOpenclawCollect(["config", "get", "models.providers.openai.api.baseUrl", "--json"]);
-    if (rawUrl && rawUrl.trim()) {
-      let parsed = JSON.parse(rawUrl.trim());
-      if (typeof parsed === "string") cfgBaseUrl.value = parsed;
-    }
-  } catch (err) { /* ignore read false */ }
 
-  try {
-    const rawModel = await installer.execOpenclawCollect(["config", "get", "agents.defaults.model", "--json"]);
-    if (rawModel && rawModel.trim()) {
-      let parsed = JSON.parse(rawModel.trim());
-      if (typeof parsed === "string") cfgDefaultModel.value = parsed;
-    }
-  } catch (err) { /* ignore read false */ }
+  const modelPrimaryValue = await readConfigJson("agents.defaults.model.primary");
+  const modelFallbackValue = modelPrimaryValue ? null : await readConfigJson("agents.defaults.model");
+  const defaultModel = getPrimaryModelRef(modelPrimaryValue) || getPrimaryModelRef(modelFallbackValue);
+  loadedProviderContext = await resolveProviderContext(defaultModel);
+
+  const [providers, workspace, maxConcurrent, subagentsMaxConcurrent, compactionMode, gatewayMode, gatewayBind, gatewayCustomBindHost, gatewayPort, gatewayAuthMode, gatewayAuthToken, gatewayAuthPassword] =
+    await Promise.all([
+      readConfigJson("models.providers"),
+      readConfigJson("agents.defaults.workspace"),
+      readConfigJson("agents.defaults.maxConcurrent"),
+      readConfigJson("agents.defaults.subagents.maxConcurrent"),
+      readConfigJson("agents.defaults.compaction.mode"),
+      readConfigJson("gateway.mode"),
+      readConfigJson("gateway.bind"),
+      readConfigJson("gateway.customBindHost"),
+      readConfigJson("gateway.port"),
+      readConfigJson("gateway.auth.mode"),
+      readConfigJson("gateway.auth.token"),
+      readConfigJson("gateway.auth.password")
+    ]);
+
+  loadedProviderCatalog = providers && typeof providers === "object" ? providers : {};
+
+  setInputValue(cfgDefaultModel, defaultModel);
+  setInputValue(cfgProviderApi, loadedProviderContext.providerApi);
+  setInputValue(cfgBaseUrl, loadedProviderContext.baseUrl);
+  setInputValue(cfgContextWindow, loadedProviderContext.contextWindow);
+  setInputValue(cfgMaxTokens, loadedProviderContext.maxTokens);
+  setInputValue(cfgWorkspace, workspace);
+  setInputValue(cfgMaxConcurrent, maxConcurrent);
+  setInputValue(cfgSubagentsMaxConcurrent, subagentsMaxConcurrent);
+  setInputValue(cfgCompactionMode, compactionMode);
+  setInputValue(cfgGatewayMode, gatewayMode);
+  setInputValue(cfgGatewayBind, gatewayBind);
+  setInputValue(cfgGatewayCustomBindHost, gatewayCustomBindHost);
+  setInputValue(cfgGatewayPort, gatewayPort);
+  setInputValue(cfgGatewayAuthMode, gatewayAuthMode);
+
+  if (cfgApiKey) cfgApiKey.value = "";
+  if (cfgGatewayAuthToken) cfgGatewayAuthToken.value = "";
+  if (cfgGatewayAuthPassword) cfgGatewayAuthPassword.value = "";
+
+  setSecretPlaceholder(
+    cfgApiKey,
+    "已配置 API Key；留空表示保持原值，输入则覆盖。",
+    "未配置 API Key；输入后保存。",
+    loadedProviderContext.hasApiKey
+  );
+  setSecretPlaceholder(
+    cfgGatewayAuthToken,
+    "已配置网关令牌；留空表示保持原值，输入则覆盖。",
+    "未配置网关令牌；输入后保存。",
+    typeof gatewayAuthToken === "string" && gatewayAuthToken.trim().length > 0
+  );
+  setSecretPlaceholder(
+    cfgGatewayAuthPassword,
+    "已配置网关密码；留空表示保持原值，输入则覆盖。",
+    "未配置网关密码；输入后保存。",
+    typeof gatewayAuthPassword === "string" && gatewayAuthPassword.trim().length > 0
+  );
+
+  loadedConfigValues = {
+    defaultModel,
+    providerApi: loadedProviderContext.providerApi,
+    baseUrl: loadedProviderContext.baseUrl,
+    contextWindow: loadedProviderContext.contextWindow,
+    maxTokens: loadedProviderContext.maxTokens,
+    workspace: workspace === undefined || workspace === null ? "" : String(workspace),
+    maxConcurrent: maxConcurrent === undefined || maxConcurrent === null ? "" : String(maxConcurrent),
+    subagentsMaxConcurrent:
+      subagentsMaxConcurrent === undefined || subagentsMaxConcurrent === null ? "" : String(subagentsMaxConcurrent),
+    compactionMode: compactionMode === undefined || compactionMode === null ? "" : String(compactionMode),
+    gatewayMode: gatewayMode === undefined || gatewayMode === null ? "" : String(gatewayMode),
+    gatewayBind: gatewayBind === undefined || gatewayBind === null ? "" : String(gatewayBind),
+    gatewayCustomBindHost: gatewayCustomBindHost === undefined || gatewayCustomBindHost === null ? "" : String(gatewayCustomBindHost),
+    gatewayPort: gatewayPort === undefined || gatewayPort === null ? "" : String(gatewayPort),
+    gatewayAuthMode: gatewayAuthMode === undefined || gatewayAuthMode === null ? "" : String(gatewayAuthMode),
+    hasGatewayAuthToken: typeof gatewayAuthToken === "string" && gatewayAuthToken.trim().length > 0,
+    hasGatewayAuthPassword: typeof gatewayAuthPassword === "string" && gatewayAuthPassword.trim().length > 0
+  };
+
+  refreshConfigPresetLists();
+  updateProviderPreview();
+  updateGatewayBindVisibility();
+  updateGatewayAuthVisibility();
   setStage("等待开始…");
 }
 
@@ -336,6 +669,7 @@ async function runOpenclawSequence(steps, { stageLabel }) {
       const title = step.stageLabel || stageLabel || "执行中…";
       setStage(title);
       setProgress(Math.min(0.95, 0.1 + (i / Math.max(1, list.length)) * 0.8));
+      if (step.logLine) appendLog(step.logLine);
       await installer.runOpenclaw(args);
     }
     setStage("完成");
@@ -356,6 +690,18 @@ async function runOpenclawSequence(steps, { stageLabel }) {
 }
 
 showLogsCheckbox.addEventListener("change", () => updateLogVisibility());
+
+if (cfgDefaultModel) {
+  cfgDefaultModel.addEventListener("input", () => updateProviderPreview());
+}
+
+if (cfgGatewayBind) {
+  cfgGatewayBind.addEventListener("change", () => updateGatewayBindVisibility());
+}
+
+if (cfgGatewayAuthMode) {
+  cfgGatewayAuthMode.addEventListener("change", () => updateGatewayAuthVisibility());
+}
 
 const requestCancelTask = async () => {
   if (!taskRunning) return;
@@ -446,53 +792,245 @@ if (configCancelBtn) {
 if (configSaveBtn) {
   configSaveBtn.addEventListener("click", async () => {
     if (taskRunning) return;
-    const newBaseUrl = cfgBaseUrl?.value ? String(cfgBaseUrl.value).trim() : "";
-    const newApiKey = cfgApiKey?.value ? String(cfgApiKey.value).trim() : "";
-    const newModel = cfgDefaultModel?.value ? String(cfgDefaultModel.value).trim() : "";
-
-    setTaskRunning(true);
     logEl.textContent = "";
-    setStage("保存全量配置中…");
-    setProgress(0.1);
-
     showLogsCheckbox.checked = true;
     updateLogVisibility();
 
-    let seq = [];
-    if (newModel) {
-      appendLog("[config] 更新默认模型...");
-      seq.push({ args: ["config", "set", "agents.defaults.model", newModel], stageLabel: "绑定模型..." });
-    }
-    if (newBaseUrl) {
-      appendLog("[config] 更新 Base URL...");
-      seq.push({ args: ["config", "set", "models.providers.openai.api.baseUrl", newBaseUrl], stageLabel: "更新请求接口..." });
-    }
-    if (newApiKey) {
-      appendLog("[config] 更新 API Key...");
-      seq.push({ args: ["config", "set", "--strict-json", "models.providers.openai.api.apiKey", JSON.stringify(newApiKey)], stageLabel: "保存密钥..." });
-    }
+    setStage("准备保存配置…");
+    setProgress(0.05);
 
-    if (seq.length > 0) {
-      const ok = await runOpenclawSequence(seq, { stageLabel: "保存配置" });
-      if (ok) {
-        if (cfgApiKey) cfgApiKey.value = "";
-        appendLog(`[ui] 配置已成功写入。网关可能需要重启以应用新规则。`);
-        confirmModal({
-          title: "配置已保存",
-          body: "配置项已成功保存。要使其实时生效（如模型推理接口），你需要重启本地网关联接服务。是否立即执行？",
-          confirmText: "尝试重启网关",
-          cancelText: "稍后"
-        }).then(async (confirmed) => {
-          if (confirmed && gatewayRestartBtn && !gatewayRestartBtn.disabled) {
-            gatewayRestartBtn.click();
-          }
-        });
+    try {
+      const newModel = getInputValue(cfgDefaultModel);
+      const newProviderApi = getInputValue(cfgProviderApi);
+      const newBaseUrl = getInputValue(cfgBaseUrl);
+      const newApiKey = getInputValue(cfgApiKey);
+      const newContextWindow = getInputValue(cfgContextWindow);
+      const newMaxTokens = getInputValue(cfgMaxTokens);
+      const newWorkspace = getInputValue(cfgWorkspace);
+      const newMaxConcurrent = getInputValue(cfgMaxConcurrent);
+      const newSubagentsMaxConcurrent = getInputValue(cfgSubagentsMaxConcurrent);
+      const newCompactionMode = getInputValue(cfgCompactionMode);
+      const newGatewayMode = getInputValue(cfgGatewayMode);
+      const newGatewayBind = getInputValue(cfgGatewayBind);
+      const newGatewayCustomBindHost = getInputValue(cfgGatewayCustomBindHost);
+      const newGatewayPort = getInputValue(cfgGatewayPort);
+      const newGatewayAuthMode = getInputValue(cfgGatewayAuthMode);
+      const newGatewayAuthToken = getInputValue(cfgGatewayAuthToken);
+      const newGatewayAuthPassword = getInputValue(cfgGatewayAuthPassword);
+
+      const targetModelRef = newModel || loadedConfigValues.defaultModel || "";
+      const { providerId: targetProviderId } = parseModelRef(targetModelRef);
+      const providerFieldsChanged =
+        (newProviderApi && newProviderApi !== loadedConfigValues.providerApi) ||
+        (newBaseUrl && newBaseUrl !== loadedConfigValues.baseUrl) ||
+        Boolean(newApiKey) ||
+        (newContextWindow && newContextWindow !== loadedConfigValues.contextWindow) ||
+        (newMaxTokens && newMaxTokens !== loadedConfigValues.maxTokens);
+
+      if (!targetProviderId && providerFieldsChanged) {
+        throw new Error("默认模型需要是 `provider/model` 格式，才能保存 Provider 相关配置。");
       }
-    } else {
-      appendLog("[ui] 没有修改任何配置。如需修改，请填写对应输入框。");
-    }
 
-    setTaskRunning(false);
+      const targetProviderContext = targetProviderId
+        ? await resolveProviderContext(targetModelRef)
+        : { providerId: "", modelId: "", modelIndex: -1 };
+
+      const seq = [];
+      const deferredNotices = [];
+
+      if (newGatewayBind === "custom" && !newGatewayCustomBindHost && !loadedConfigValues.gatewayCustomBindHost) {
+        throw new Error("监听地址选择 custom 时，必须填写“自定义监听 Host”。");
+      }
+
+      if (newGatewayAuthMode === "token" && !newGatewayAuthToken && !loadedConfigValues.hasGatewayAuthToken) {
+        throw new Error("鉴权模式为 token 时，当前还没有已保存令牌，请填写“鉴权令牌”。");
+      }
+
+      if (newGatewayAuthMode === "password" && !newGatewayAuthPassword && !loadedConfigValues.hasGatewayAuthPassword) {
+        throw new Error("鉴权模式为 password 时，当前还没有已保存密码，请填写“鉴权密码”。");
+      }
+
+      queueTextConfigSet(seq, {
+        label: "默认模型",
+        path: "agents.defaults.model.primary",
+        value: newModel,
+        currentValue: loadedConfigValues.defaultModel,
+        stageLabel: "更新默认模型…"
+      });
+
+      if (targetProviderId) {
+        const providerBasePath = `models.providers.${targetProviderId}`;
+        queueTextConfigSet(seq, {
+          label: "Provider API 模式",
+          path: `${providerBasePath}.api`,
+          value: newProviderApi,
+          currentValue: loadedConfigValues.providerApi,
+          stageLabel: "更新 Provider API 模式…"
+        });
+        queueTextConfigSet(seq, {
+          label: "Base URL",
+          path: `${providerBasePath}.baseUrl`,
+          value: newBaseUrl,
+          currentValue: loadedConfigValues.baseUrl,
+          stageLabel: "更新 Base URL…"
+        });
+        queueTextConfigSet(seq, {
+          label: "API Key",
+          path: `${providerBasePath}.apiKey`,
+          value: newApiKey,
+          stageLabel: "保存 API Key…",
+          strictJson: true,
+          secret: true
+        });
+
+        const hasModelTuningChange =
+          (newContextWindow && newContextWindow !== loadedConfigValues.contextWindow) ||
+          (newMaxTokens && newMaxTokens !== loadedConfigValues.maxTokens);
+
+        if (targetProviderContext.modelIndex >= 0) {
+          const modelBasePath = `${providerBasePath}.models[${targetProviderContext.modelIndex}]`;
+          queueIntegerConfigSet(seq, {
+            label: "Context Window",
+            path: `${modelBasePath}.contextWindow`,
+            rawValue: newContextWindow,
+            currentValue: loadedConfigValues.contextWindow,
+            stageLabel: "更新 Context Window…"
+          });
+          queueIntegerConfigSet(seq, {
+            label: "Max Tokens",
+            path: `${modelBasePath}.maxTokens`,
+            rawValue: newMaxTokens,
+            currentValue: loadedConfigValues.maxTokens,
+            stageLabel: "更新 Max Tokens…"
+          });
+        } else if (hasModelTuningChange) {
+          deferredNotices.push("[警告] 当前默认模型未在 provider.models 中注册，已跳过 Context Window / Max Tokens。");
+        }
+      }
+
+      queueTextConfigSet(seq, {
+        label: "默认工作目录",
+        path: "agents.defaults.workspace",
+        value: newWorkspace,
+        currentValue: loadedConfigValues.workspace,
+        stageLabel: "更新默认工作目录…"
+      });
+      queueIntegerConfigSet(seq, {
+        label: "最大并发",
+        path: "agents.defaults.maxConcurrent",
+        rawValue: newMaxConcurrent,
+        currentValue: loadedConfigValues.maxConcurrent,
+        stageLabel: "更新最大并发…"
+      });
+      queueIntegerConfigSet(seq, {
+        label: "子代理最大并发",
+        path: "agents.defaults.subagents.maxConcurrent",
+        rawValue: newSubagentsMaxConcurrent,
+        currentValue: loadedConfigValues.subagentsMaxConcurrent,
+        stageLabel: "更新子代理并发…"
+      });
+      queueTextConfigSet(seq, {
+        label: "压缩模式",
+        path: "agents.defaults.compaction.mode",
+        value: newCompactionMode,
+        currentValue: loadedConfigValues.compactionMode,
+        stageLabel: "更新压缩模式…"
+      });
+      queueTextConfigSet(seq, {
+        label: "网关模式",
+        path: "gateway.mode",
+        value: newGatewayMode,
+        currentValue: loadedConfigValues.gatewayMode,
+        stageLabel: "更新网关模式…"
+      });
+      queueTextConfigSet(seq, {
+        label: "监听地址",
+        path: "gateway.bind",
+        value: newGatewayBind,
+        currentValue: loadedConfigValues.gatewayBind,
+        stageLabel: "更新监听地址…"
+      });
+      queueTextConfigSet(seq, {
+        label: "自定义监听 Host",
+        path: "gateway.customBindHost",
+        value: newGatewayCustomBindHost,
+        currentValue: loadedConfigValues.gatewayCustomBindHost,
+        stageLabel: "更新自定义监听 Host…"
+      });
+      queueIntegerConfigSet(seq, {
+        label: "网关端口",
+        path: "gateway.port",
+        rawValue: newGatewayPort,
+        currentValue: loadedConfigValues.gatewayPort,
+        stageLabel: "更新网关端口…",
+        max: 65535
+      });
+      queueTextConfigSet(seq, {
+        label: "鉴权模式",
+        path: "gateway.auth.mode",
+        value: newGatewayAuthMode,
+        currentValue: loadedConfigValues.gatewayAuthMode,
+        stageLabel: "更新鉴权模式…"
+      });
+      queueTextConfigSet(seq, {
+        label: "网关令牌",
+        path: "gateway.auth.token",
+        value: newGatewayAuthToken,
+        stageLabel: "保存网关令牌…",
+        strictJson: true,
+        secret: true
+      });
+      queueTextConfigSet(seq, {
+        label: "网关密码",
+        path: "gateway.auth.password",
+        value: newGatewayAuthPassword,
+        stageLabel: "保存网关密码…",
+        strictJson: true,
+        secret: true
+      });
+
+      if (newGatewayMode === "remote") {
+        deferredNotices.push("[警告] `gateway.mode=remote` 通常还需要补充 `gateway.remote.*`，当前页面暂未覆盖这些字段。");
+      }
+
+      if (newGatewayAuthMode === "trusted-proxy") {
+        deferredNotices.push("[警告] `trusted-proxy` 还需要配置 `gateway.trustedProxies` 和 `gateway.auth.trustedProxy.*`，请确认已手工补齐。");
+      }
+
+      if (seq.length === 0) {
+        setStage("等待开始…");
+        setProgress(0);
+        deferredNotices.forEach((line) => appendLog(line));
+        appendLog("[ui] 没有检测到新的配置变更。");
+        return;
+      }
+
+      const ok = await runOpenclawSequence(seq, { stageLabel: "保存配置" });
+      deferredNotices.forEach((line) => appendLog(line));
+      if (!ok) return;
+
+      if (cfgApiKey) cfgApiKey.value = "";
+      if (cfgGatewayAuthToken) cfgGatewayAuthToken.value = "";
+      if (cfgGatewayAuthPassword) cfgGatewayAuthPassword.value = "";
+      if (!configCard.classList.contains("hidden")) {
+        await loadConfigValues();
+      }
+
+      appendLog("[ui] 配置已成功写入。网关可能需要重启以应用新规则。");
+      confirmModal({
+        title: "配置已保存",
+        body: "配置项已成功保存。要使其实时生效（如模型推理接口），你需要重启本地网关联接服务。是否立即执行？",
+        confirmText: "尝试重启网关",
+        cancelText: "稍后"
+      }).then(async (confirmed) => {
+        if (confirmed && gatewayRestartBtn && !gatewayRestartBtn.disabled) {
+          gatewayRestartBtn.click();
+        }
+      });
+    } catch (error) {
+      setStage("失败");
+      appendLog(`[错误] ${error?.message || String(error)}`);
+    }
   });
 }
 

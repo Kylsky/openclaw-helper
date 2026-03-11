@@ -136,6 +136,7 @@ body {
 }
 
 input[type="text"],
+input[type="number"],
 input[type="password"],
 textarea,
 select {
@@ -523,6 +524,28 @@ button:disabled {
   letter-spacing: 0.2px;
 }
 
+.fieldGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+}
+
+.fieldSpan2 {
+  grid-column: 1 / -1;
+}
+
+.hint {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+input[readonly] {
+  cursor: default;
+  opacity: 0.8;
+}
+
 @media (max-width: 768px) {
   .app {
     padding: 20px 16px;
@@ -530,5 +553,13 @@ button:disabled {
 
   .featureGrid {
     grid-template-columns: 1fr;
+  }
+
+  .fieldGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .fieldSpan2 {
+    grid-column: auto;
   }
 }
