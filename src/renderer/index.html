@@ -50,7 +50,10 @@
             ↻
           </button>
         </div>
-        <button id="openDashboardBtn" type="button">进入控制台</button>
+        <div class="row">
+          <button id="openConfigBtn" class="secondary" type="button" style="padding: 10px 14px;">系统配置</button>
+          <button id="openDashboardBtn" type="button">进入控制台</button>
+        </div>
       </div>
       <div class="featureGrid">
         <div class="featureCard">
@@ -120,6 +123,38 @@
           </div>
           <div class="featureDesc" style="margin-bottom: auto">
             清理服务和命令行工具，不可逆转。
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="configCard" class="card hidden">
+      <div class="featureHeader" style="margin-bottom: 24px;">
+        <h2 style="margin: 0">配置中心</h2>
+        <div class="featureActions" style="margin-top: 0; padding-top: 0;">
+          <button id="configCancelBtn" class="secondary" style="padding: 6px 14px; font-size: 13px" type="button">放弃</button>
+          <button id="configSaveBtn" style="padding: 6px 14px; font-size: 13px" type="button">保存</button>
+        </div>
+      </div>
+      
+      <div class="configScroll">
+        <div class="configGroup">
+          <h3 class="configGroupTitle">模型配置</h3>
+          <div class="field">
+            <div class="label">全局默认模型 (Provider / Model ID)</div>
+            <input id="cfgDefaultModel" type="text" placeholder="例如: openai/gpt-5.4" />
+          </div>
+        </div>
+
+        <div class="configGroup">
+          <h3 class="configGroupTitle">API 服务 (OpenAI 兼容)</h3>
+          <div class="field">
+            <div class="label">Base URL</div>
+            <input id="cfgBaseUrl" type="text" placeholder="例如: https://api.openai.com/v1" />
+          </div>
+          <div class="field">
+            <div class="label">API Key</div>
+            <input id="cfgApiKey" type="password" placeholder="（基于安全原因输入框留空，填写则覆盖原值）" />
           </div>
         </div>
       </div>

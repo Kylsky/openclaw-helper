@@ -40,6 +40,11 @@ window.installer = {
     const finalArgs = Array.isArray(args) ? args.map((x) => String(x)) : [];
     return await invoke("run_openclaw", { args: finalArgs });
   },
+  execOpenclawCollect: async (args) => {
+    const { invoke } = assertTauri();
+    const finalArgs = Array.isArray(args) ? args.map((x) => String(x)) : [];
+    return await invoke("exec_openclaw_collect", { args: finalArgs });
+  },
   openDashboard: async () => {
     const { invoke } = assertTauri();
     const url = await invoke("open_dashboard", {});

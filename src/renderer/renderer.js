@@ -5,10 +5,13 @@ const el = (id) => document.getElementById(id);
 const subtitleEl = el("subtitle");
 const installerCard = el("installerCard");
 const dashboardCard = el("dashboardCard");
+const configCard = el("configCard");
+
 const versionPill = el("versionPill");
 const gatewayStatusPill = el("gatewayStatusPill");
 const refreshBtn = el("refreshBtn");
 const openDashboardBtn = el("openDashboardBtn");
+const openConfigBtn = el("openConfigBtn");
 
 const installBtn = el("installBtn");
 const cancelBtn = el("cancelBtn");
@@ -28,6 +31,13 @@ const progressText = el("progressText");
 const gatewayStartBtn = el("gatewayStartBtn");
 const gatewayStopBtn = el("gatewayStopBtn");
 const gatewayRestartBtn = el("gatewayRestartBtn");
+
+const configCancelBtn = el("configCancelBtn");
+const configSaveBtn = el("configSaveBtn");
+const cfgDefaultModel = el("cfgDefaultModel");
+const cfgBaseUrl = el("cfgBaseUrl");
+const cfgApiKey = el("cfgApiKey");
+
 const doctorBtn = el("doctorBtn");
 const updateBtn = el("updateBtn");
 const updateChannel = el("updateChannel");
@@ -188,6 +198,8 @@ function setTaskRunning(value) {
   doctorBtn.disabled = value;
   updateBtn.disabled = value;
   if (uninstallBtn) uninstallBtn.disabled = value;
+  if (configSaveBtn) configSaveBtn.disabled = value;
+  if (openConfigBtn) openConfigBtn.disabled = value;
   refreshBtn.disabled = value;
 }
 
@@ -195,6 +207,7 @@ function showInstaller() {
   if (subtitleEl) subtitleEl.textContent = "一键安装";
   installerCard.classList.remove("hidden");
   dashboardCard.classList.add("hidden");
+  configCard.classList.add("hidden");
 }
 
 function showDashboard(version) {
@@ -203,6 +216,7 @@ function showDashboard(version) {
   gatewayStatusPill.textContent = "网关：检测中…";
   installerCard.classList.add("hidden");
   dashboardCard.classList.remove("hidden");
+  configCard.classList.add("hidden");
   applyGatewayActionAvailability();
 }
 
@@ -231,8 +245,32 @@ async function refreshGatewayStatus() {
   } catch (error) {
     gatewayStatusPill.textContent = "网关：检测失败";
     appendLog(`[错误] ${error?.message || String(error)}`);
-    await rerouteIfOpenclawMissing(error);
   }
+}
+
+async function loadConfigValues() {
+  if (!cfgBaseUrl || !cfgDefaultModel) return;
+  cfgDefaultModel.value = "";
+  cfgBaseUrl.value = "";
+  cfgApiKey.value = "";
+
+  setStage("读取配置中…");
+  try {
+    const rawUrl = await installer.execOpenclawCollect(["config", "get", "models.providers.openai.api.baseUrl", "--json"]);
+    if (rawUrl && rawUrl.trim()) {
+      let parsed = JSON.parse(rawUrl.trim());
+      if (typeof parsed === "string") cfgBaseUrl.value = parsed;
+    }
+  } catch (err) { /* ignore read false */ }
+
+  try {
+    const rawModel = await installer.execOpenclawCollect(["config", "get", "agents.defaults.model", "--json"]);
+    if (rawModel && rawModel.trim()) {
+      let parsed = JSON.parse(rawModel.trim());
+      if (typeof parsed === "string") cfgDefaultModel.value = parsed;
+    }
+  } catch (err) { /* ignore read false */ }
+  setStage("等待开始…");
 }
 
 async function checkAndRoute() {
@@ -387,6 +425,76 @@ openDashboardBtn.addEventListener("click", async () => {
     setTaskRunning(false);
   }
 });
+
+if (openConfigBtn) {
+  openConfigBtn.addEventListener("click", async () => {
+    if (taskRunning) return;
+    if (subtitleEl) subtitleEl.textContent = "系统配置";
+    dashboardCard.classList.add("hidden");
+    configCard.classList.remove("hidden");
+    await loadConfigValues();
+  });
+}
+
+if (configCancelBtn) {
+  configCancelBtn.addEventListener("click", async () => {
+    if (taskRunning) return;
+    await checkAndRoute();
+  });
+}
+
+if (configSaveBtn) {
+  configSaveBtn.addEventListener("click", async () => {
+    if (taskRunning) return;
+    const newBaseUrl = cfgBaseUrl?.value ? String(cfgBaseUrl.value).trim() : "";
+    const newApiKey = cfgApiKey?.value ? String(cfgApiKey.value).trim() : "";
+    const newModel = cfgDefaultModel?.value ? String(cfgDefaultModel.value).trim() : "";
+
+    setTaskRunning(true);
+    logEl.textContent = "";
+    setStage("保存全量配置中…");
+    setProgress(0.1);
+
+    showLogsCheckbox.checked = true;
+    updateLogVisibility();
+
+    let seq = [];
+    if (newModel) {
+      appendLog("[config] 更新默认模型...");
+      seq.push({ args: ["config", "set", "agents.defaults.model", newModel], stageLabel: "绑定模型..." });
+    }
+    if (newBaseUrl) {
+      appendLog("[config] 更新 Base URL...");
+      seq.push({ args: ["config", "set", "models.providers.openai.api.baseUrl", newBaseUrl], stageLabel: "更新请求接口..." });
+    }
+    if (newApiKey) {
+      appendLog("[config] 更新 API Key...");
+      seq.push({ args: ["config", "set", "--strict-json", "models.providers.openai.api.apiKey", JSON.stringify(newApiKey)], stageLabel: "保存密钥..." });
+    }
+
+    if (seq.length > 0) {
+      const ok = await runOpenclawSequence(seq, { stageLabel: "保存配置" });
+      if (ok) {
+        if (cfgApiKey) cfgApiKey.value = "";
+        appendLog(`[ui] 配置已成功写入。网关可能需要重启以应用新规则。`);
+        confirmModal({
+          title: "配置已保存",
+          body: "配置项已成功保存。要使其实时生效（如模型推理接口），你需要重启本地网关联接服务。是否立即执行？",
+          confirmText: "尝试重启网关",
+          cancelText: "稍后"
+        }).then(async (confirmed) => {
+          if (confirmed && gatewayRestartBtn && !gatewayRestartBtn.disabled) {
+            gatewayRestartBtn.click();
+          }
+        });
+      }
+    } else {
+      appendLog("[ui] 没有修改任何配置。如需修改，请填写对应输入框。");
+    }
+
+    setTaskRunning(false);
+  });
+}
 
 gatewayStartBtn.addEventListener("click", async () => {
   const isWindows = /windows/i.test(navigator.userAgent || "");

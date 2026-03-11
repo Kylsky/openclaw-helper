@@ -496,6 +496,33 @@ button:disabled {
   background: rgba(255, 255, 255, 0.3);
 }
 
+.configScroll {
+  overflow-y: auto;
+  max-height: 480px;
+  margin-right: -8px;
+  padding-right: 8px;
+}
+
+.configGroup {
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.configGroup:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.configGroupTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  margin: 0 0 12px 0;
+  letter-spacing: 0.2px;
+}
+
 @media (max-width: 768px) {
   .app {
     padding: 20px 16px;

@@ -643,6 +643,13 @@ pub async fn run_openclaw(window: Window, state: tauri::State<'_, TaskState>, ar
 }
 
 #[tauri::command]
+pub async fn exec_openclaw_collect(args: Vec<String>) -> Result<String, String> {
+  let resolved = resolve_openclaw().ok_or("未检测到 openclaw")?;
+  let s_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+  run_openclaw_collect(&resolved, &s_args)
+}
+
+#[tauri::command]
 pub async fn open_dashboard(_app: AppHandle) -> Result<String, String> {
   let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
 
