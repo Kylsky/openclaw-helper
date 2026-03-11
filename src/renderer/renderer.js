@@ -56,6 +56,9 @@ const cfgGatewayAuthToken = el("cfgGatewayAuthToken");
 const cfgGatewayAuthPasswordField = el("cfgGatewayAuthPasswordField");
 const cfgGatewayAuthPassword = el("cfgGatewayAuthPassword");
 const cfgDefaultModelPresets = el("cfgDefaultModelPresets");
+const workspaceMarkdownExpandBtn = el("workspaceMarkdownExpandBtn");
+const workspaceMarkdownCollapseBtn = el("workspaceMarkdownCollapseBtn");
+const workspaceMarkdownList = el("workspaceMarkdownList");
 
 const doctorBtn = el("doctorBtn");
 const updateBtn = el("updateBtn");
@@ -67,13 +70,18 @@ const modalTitle = el("modalTitle");
 const modalBody = el("modalBody");
 const modalCancelBtn = el("modalCancelBtn");
 const modalConfirmBtn = el("modalConfirmBtn");
-const configInputs = Array.from(document.querySelectorAll("#configCard input, #configCard select, #configCard textarea"));
+function getConfigInputs() {
+  return Array.from(document.querySelectorAll("#configCard input, #configCard select, #configCard textarea"));
+}
 
 let taskRunning = false;
 let cachedGatewayState = "unknown";
 let loadedConfigValues = {};
 let loadedProviderContext = { providerId: "", modelId: "", modelIndex: -1 };
 let loadedProviderCatalog = {};
+let loadedWorkspaceMarkdowns = [];
+let workspaceMarkdownEditors = new Map();
+let expandedWorkspaceMarkdownNames = null;
 
 function confirmModal({ title, body, confirmText = "确定", cancelText = "取消" }) {
   return new Promise((resolve) => {
@@ -189,7 +197,8 @@ function appendLog(line) {
       trimmed.startsWith("[npm]") ||
       trimmed.startsWith("[brew]") ||
       trimmed.startsWith("[openclaw]") ||
-      trimmed.startsWith("[config]")
+      trimmed.startsWith("[config]") ||
+      trimmed.startsWith("[markdown]")
     ) {
       return "logLine logCmd";
     }
@@ -243,6 +252,228 @@ function setDatalistOptions(datalist, values) {
       return option;
     })
   );
+}
+
+
+function autosizeTextarea(textarea) {
+  if (!(textarea instanceof HTMLTextAreaElement)) return;
+  textarea.style.height = "auto";
+  textarea.style.height = `${Math.max(textarea.scrollHeight, 160)}px`;
+}
+
+function normalizeWorkspaceMarkdownDocument(document) {
+  return {
+    name: String(document?.name ?? "").trim(),
+    path: String(document?.path ?? "").trim(),
+    exists: Boolean(document?.exists),
+    content: String(document?.content ?? "").replace(/\r\n/g, "\n")
+  };
+}
+
+function syncWorkspaceMarkdownExpandedNames() {
+  expandedWorkspaceMarkdownNames = new Set(
+    Array.from(workspaceMarkdownEditors.entries())
+      .filter(([, editor]) => Boolean(editor?.details?.open))
+      .map(([name]) => name)
+  );
+}
+
+function updateWorkspaceMarkdownToolbarAvailability() {
+  const hasEditors = workspaceMarkdownEditors.size > 0;
+  if (workspaceMarkdownExpandBtn) workspaceMarkdownExpandBtn.disabled = taskRunning || !hasEditors;
+  if (workspaceMarkdownCollapseBtn) workspaceMarkdownCollapseBtn.disabled = taskRunning || !hasEditors;
+}
+
+function updateWorkspaceMarkdownDirtyState(name) {
+  const editor = workspaceMarkdownEditors.get(name);
+  const original = loadedWorkspaceMarkdowns.find((documentItem) => documentItem.name === name);
+  if (!editor || !original) return;
+
+  const nextContent = String(editor.textarea?.value ?? "").replace(/\r\n/g, "\n");
+  const prevContent = String(original.content ?? "").replace(/\r\n/g, "\n");
+  const isDirty = nextContent !== prevContent;
+
+  if (editor.stateBadge) {
+    editor.stateBadge.textContent = isDirty ? "已修改" : "未改动";
+    editor.stateBadge.classList.toggle("dirty", isDirty);
+  }
+}
+
+function renderWorkspaceMarkdownEditors(documents) {
+  if (!workspaceMarkdownList) return;
+
+  if (workspaceMarkdownEditors.size > 0) {
+    syncWorkspaceMarkdownExpandedNames();
+  }
+
+  workspaceMarkdownEditors = new Map();
+  workspaceMarkdownList.replaceChildren();
+
+  const list = Array.isArray(documents) ? documents : [];
+  if (list.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = "当前未发现可编辑的 workspace Markdown 文件。";
+    workspaceMarkdownList.append(empty);
+    updateWorkspaceMarkdownToolbarAvailability();
+    return;
+  }
+
+  const restoredExpanded = expandedWorkspaceMarkdownNames instanceof Set ? new Set(expandedWorkspaceMarkdownNames) : null;
+
+  list.forEach((documentItem, index) => {
+    const details = document.createElement("details");
+    details.className = "markdownEditorCard markdownEditorAccordion";
+    details.open = restoredExpanded ? restoredExpanded.has(documentItem.name) : index === 0;
+
+    const summary = document.createElement("summary");
+    summary.className = "markdownEditorSummary";
+
+    const summaryMain = document.createElement("div");
+    summaryMain.className = "markdownEditorSummaryMain";
+
+    const title = document.createElement("div");
+    title.className = "featureTitle";
+    title.textContent = documentItem.name;
+
+    const summaryMeta = document.createElement("div");
+    summaryMeta.className = "markdownEditorSummaryMeta";
+    summaryMeta.textContent = documentItem.path || documentItem.name;
+
+    summaryMain.append(title, summaryMeta);
+
+    const badges = document.createElement("div");
+    badges.className = "markdownEditorSummaryBadges";
+
+    const stateBadge = document.createElement("span");
+    stateBadge.className = "markdownEditorBadge";
+    stateBadge.textContent = "未改动";
+
+    const existsBadge = document.createElement("span");
+    existsBadge.className = `markdownEditorBadge${documentItem.exists ? "" : " missing"}`;
+    existsBadge.textContent = documentItem.exists ? "已存在" : "待创建";
+
+    badges.append(stateBadge, existsBadge);
+    summary.append(summaryMain, badges);
+
+    const body = document.createElement("div");
+    body.className = "markdownEditorBody";
+
+    const meta = document.createElement("div");
+    meta.className = "markdownEditorMeta";
+    meta.textContent = documentItem.path || documentItem.name;
+
+    const textarea = document.createElement("textarea");
+    textarea.className = "markdownTextarea";
+    textarea.value = documentItem.content;
+    textarea.placeholder = documentItem.exists
+      ? `编辑 ${documentItem.name} 内容…`
+      : `${documentItem.name} 当前不存在，输入内容后保存会自动创建。`;
+    textarea.disabled = taskRunning;
+    textarea.spellcheck = false;
+    textarea.dataset.markdownName = documentItem.name;
+    textarea.addEventListener("input", () => {
+      autosizeTextarea(textarea);
+      updateWorkspaceMarkdownDirtyState(documentItem.name);
+    });
+
+    body.append(meta, textarea);
+
+    if (!documentItem.exists) {
+      const hint = document.createElement("div");
+      hint.className = "hint";
+      hint.textContent = "当前文件不存在，保存后自动创建。";
+      body.append(hint);
+    }
+
+    details.append(summary, body);
+    details.addEventListener("toggle", () => {
+      syncWorkspaceMarkdownExpandedNames();
+      if (details.open) autosizeTextarea(textarea);
+    });
+    workspaceMarkdownList.append(details);
+
+    autosizeTextarea(textarea);
+    workspaceMarkdownEditors.set(documentItem.name, {
+      textarea,
+      details,
+      stateBadge,
+      existsBadge,
+      path: documentItem.path,
+      exists: documentItem.exists
+    });
+    updateWorkspaceMarkdownDirtyState(documentItem.name);
+  });
+
+  if (restoredExpanded === null) {
+    syncWorkspaceMarkdownExpandedNames();
+  }
+  updateWorkspaceMarkdownToolbarAvailability();
+}
+
+async function loadWorkspaceMarkdownValues() {
+  if (!workspaceMarkdownList) return;
+
+  try {
+    const documents = await installer.loadWorkspaceMarkdowns();
+    loadedWorkspaceMarkdowns = Array.isArray(documents)
+      ? documents.map((documentItem) => normalizeWorkspaceMarkdownDocument(documentItem)).filter((documentItem) => documentItem.name)
+      : [];
+    renderWorkspaceMarkdownEditors(loadedWorkspaceMarkdowns);
+  } catch (error) {
+    loadedWorkspaceMarkdowns = [];
+    renderWorkspaceMarkdownEditors([]);
+    appendLog(`[错误] 读取 workspace Markdown 失败：${error?.message || String(error)}`);
+  }
+}
+
+function collectWorkspaceMarkdownChanges() {
+  return loadedWorkspaceMarkdowns.flatMap((documentItem) => {
+    const editor = workspaceMarkdownEditors.get(documentItem.name);
+    if (!editor?.textarea) return [];
+
+    const nextContent = String(editor.textarea.value ?? "").replace(/\r\n/g, "\n");
+    const prevContent = String(documentItem.content ?? "").replace(/\r\n/g, "\n");
+    if (nextContent === prevContent) return [];
+
+    return [{
+      name: documentItem.name,
+      path: documentItem.path,
+      content: nextContent,
+      exists: documentItem.exists
+    }];
+  });
+}
+
+async function runWorkspaceMarkdownSaveSequence(changes, { stageLabel } = {}) {
+  if (taskRunning) return false;
+  const list = Array.isArray(changes) ? changes.filter(Boolean) : [];
+  if (list.length === 0) return true;
+
+  setTaskRunning(true);
+  setStage(stageLabel || "保存 Workspace Markdown…");
+  setProgress(0.05);
+
+  try {
+    for (let i = 0; i < list.length; i += 1) {
+      const item = list[i];
+      setStage(`保存 ${item.name}…`);
+      setProgress(Math.min(0.95, 0.1 + (i / Math.max(1, list.length)) * 0.8));
+      appendLog(`[markdown] 保存 ${item.name}...`);
+      await installer.saveWorkspaceMarkdown(item.name, item.content);
+    }
+    setStage("完成");
+    setProgress(1);
+    return true;
+  } catch (error) {
+    setStage("失败");
+    appendLog(`[错误] ${error?.message || String(error)}`);
+    showLogsCheckbox.checked = true;
+    updateLogVisibility();
+    return false;
+  } finally {
+    setTaskRunning(false);
+  }
 }
 
 function parseJsonOutput(raw) {
@@ -385,7 +616,7 @@ function setSecretPlaceholder(input, configuredText, emptyText, hasConfiguredVal
 }
 
 function resetConfigInputs() {
-  configInputs.forEach((input) => {
+  getConfigInputs().forEach((input) => {
     if (input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement || input instanceof HTMLSelectElement) {
       input.value = "";
     }
@@ -455,12 +686,13 @@ function setTaskRunning(value) {
   if (configCancelBtn) configCancelBtn.disabled = value;
   if (openConfigBtn) openConfigBtn.disabled = value;
   refreshBtn.disabled = value;
-  configInputs.forEach((input) => {
+  getConfigInputs().forEach((input) => {
     if (input.id === "cfgProviderId") return;
     input.disabled = value;
   });
   updateGatewayBindVisibility();
   updateGatewayAuthVisibility();
+  updateWorkspaceMarkdownToolbarAvailability();
 }
 
 function showInstaller() {
@@ -603,6 +835,7 @@ async function loadConfigValues() {
   updateProviderPreview();
   updateGatewayBindVisibility();
   updateGatewayAuthVisibility();
+  await loadWorkspaceMarkdownValues();
   setStage("等待开始…");
 }
 
@@ -701,6 +934,26 @@ if (cfgGatewayBind) {
 
 if (cfgGatewayAuthMode) {
   cfgGatewayAuthMode.addEventListener("change", () => updateGatewayAuthVisibility());
+}
+
+if (workspaceMarkdownExpandBtn) {
+  workspaceMarkdownExpandBtn.addEventListener("click", () => {
+    expandedWorkspaceMarkdownNames = new Set(Array.from(workspaceMarkdownEditors.keys()));
+    workspaceMarkdownEditors.forEach((editor) => {
+      if (editor?.details) editor.details.open = true;
+    });
+    updateWorkspaceMarkdownToolbarAvailability();
+  });
+}
+
+if (workspaceMarkdownCollapseBtn) {
+  workspaceMarkdownCollapseBtn.addEventListener("click", () => {
+    expandedWorkspaceMarkdownNames = new Set();
+    workspaceMarkdownEditors.forEach((editor) => {
+      if (editor?.details) editor.details.open = false;
+    });
+    updateWorkspaceMarkdownToolbarAvailability();
+  });
 }
 
 const requestCancelTask = async () => {
@@ -997,17 +1250,29 @@ if (configSaveBtn) {
         deferredNotices.push("[警告] `trusted-proxy` 还需要配置 `gateway.trustedProxies` 和 `gateway.auth.trustedProxy.*`，请确认已手工补齐。");
       }
 
-      if (seq.length === 0) {
+      const markdownChanges = collectWorkspaceMarkdownChanges();
+      deferredNotices.forEach((line) => appendLog(line));
+
+      if (seq.length === 0 && markdownChanges.length === 0) {
         setStage("等待开始…");
         setProgress(0);
-        deferredNotices.forEach((line) => appendLog(line));
-        appendLog("[ui] 没有检测到新的配置变更。");
+        appendLog("[ui] 没有检测到新的配置或 Markdown 变更。");
         return;
       }
 
-      const ok = await runOpenclawSequence(seq, { stageLabel: "保存配置" });
-      deferredNotices.forEach((line) => appendLog(line));
-      if (!ok) return;
+      let configSaved = false;
+      if (seq.length > 0) {
+        const ok = await runOpenclawSequence(seq, { stageLabel: "保存配置" });
+        if (!ok) return;
+        configSaved = true;
+      }
+
+      let markdownSaved = false;
+      if (markdownChanges.length > 0) {
+        const ok = await runWorkspaceMarkdownSaveSequence(markdownChanges, { stageLabel: "保存 Workspace Markdown…" });
+        if (!ok) return;
+        markdownSaved = true;
+      }
 
       if (cfgApiKey) cfgApiKey.value = "";
       if (cfgGatewayAuthToken) cfgGatewayAuthToken.value = "";
@@ -1016,17 +1281,23 @@ if (configSaveBtn) {
         await loadConfigValues();
       }
 
-      appendLog("[ui] 配置已成功写入。网关可能需要重启以应用新规则。");
-      confirmModal({
-        title: "配置已保存",
-        body: "配置项已成功保存。要使其实时生效（如模型推理接口），你需要重启本地网关联接服务。是否立即执行？",
-        confirmText: "尝试重启网关",
-        cancelText: "稍后"
-      }).then(async (confirmed) => {
-        if (confirmed && gatewayRestartBtn && !gatewayRestartBtn.disabled) {
-          gatewayRestartBtn.click();
-        }
-      });
+      if (configSaved) {
+        appendLog(markdownSaved ? "[ui] 配置和 Workspace Markdown 已成功写入。网关可能需要重启以应用新规则。" : "[ui] 配置已成功写入。网关可能需要重启以应用新规则。");
+        confirmModal({
+          title: "配置已保存",
+          body: markdownSaved
+            ? "配置项与 Workspace Markdown 已成功保存。要使网关相关配置实时生效，你可能需要重启本地网关服务。是否立即执行？"
+            : "配置项已成功保存。要使其实时生效（如模型推理接口），你需要重启本地网关联接服务。是否立即执行？",
+          confirmText: "尝试重启网关",
+          cancelText: "稍后"
+        }).then(async (confirmed) => {
+          if (confirmed && gatewayRestartBtn && !gatewayRestartBtn.disabled) {
+            gatewayRestartBtn.click();
+          }
+        });
+      } else if (markdownSaved) {
+        appendLog("[ui] Workspace Markdown 已成功保存。新会话或后续上下文加载时会生效。");
+      }
     } catch (error) {
       setStage("失败");
       appendLog(`[错误] ${error?.message || String(error)}`);
@@ -1034,26 +1305,38 @@ if (configSaveBtn) {
   });
 }
 
-gatewayStartBtn.addEventListener("click", async () => {
+async function buildGatewayEnsureStartedSteps({ includeStop = false } = {}) {
   const isWindows = /windows/i.test(navigator.userAgent || "");
 
-  // If the service wasn't installed (or got removed), installing on-demand keeps
-  // the UI simpler while still being resilient.
   const steps = [];
+  let status = null;
+  let looksMissing = false;
+
   if (!isWindows) {
     try {
-      const status = await installer.getGatewayStatus();
+      status = await installer.getGatewayStatus();
       const raw = String(status?.raw || "");
-      const looksMissing =
-        /scheduled task\s*\(missing\)|gateway service missing|service missing/i.test(raw);
-      if (status?.state === "not_installed" || looksMissing) {
-        steps.push({ args: ["gateway", "install"], stageLabel: "安装网关服务…" });
-      }
+      looksMissing = /scheduled task\s*\(missing\)|gateway service missing|service missing/i.test(raw);
     } catch {
-      // ignore and let start attempt run
+      // ignore and let the actual commands attempt run
     }
   }
+
+  const requiresInstall = !isWindows && (status?.state === "not_installed" || looksMissing);
+
+  if (includeStop && !requiresInstall) {
+    steps.push({ args: ["gateway", "stop"], stageLabel: "停止网关服务…" });
+  }
+  if (requiresInstall) {
+    steps.push({ args: ["gateway", "install"], stageLabel: "安装网关服务…" });
+  }
   steps.push({ args: ["gateway", "start"], stageLabel: "启动网关服务…" });
+
+  return steps;
+}
+
+gatewayStartBtn.addEventListener("click", async () => {
+  const steps = await buildGatewayEnsureStartedSteps();
   await runOpenclawSequence(steps, { stageLabel: "启动网关服务…" });
   await refreshGatewayStatus();
 });
@@ -1063,10 +1346,8 @@ gatewayStopBtn.addEventListener("click", async () => {
 });
 
 gatewayRestartBtn.addEventListener("click", async () => {
-  await runOpenclawSequence([
-    { args: ["gateway", "stop"], stageLabel: "停止网关服务…" },
-    { args: ["gateway", "start"], stageLabel: "启动网关服务…" }
-  ], { stageLabel: "重启网关服务…" });
+  const steps = await buildGatewayEnsureStartedSteps({ includeStop: true });
+  await runOpenclawSequence(steps, { stageLabel: "重启网关服务…" });
   await refreshGatewayStatus();
 });
 

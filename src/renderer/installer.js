@@ -45,6 +45,17 @@ window.installer = {
     const finalArgs = Array.isArray(args) ? args.map((x) => String(x)) : [];
     return await invoke("exec_openclaw_collect", { args: finalArgs });
   },
+  loadWorkspaceMarkdowns: async () => {
+    const { invoke } = assertTauri();
+    return await invoke("load_workspace_markdowns", {});
+  },
+  saveWorkspaceMarkdown: async (name, content) => {
+    const { invoke } = assertTauri();
+    return await invoke("save_workspace_markdown", {
+      name: String(name),
+      content: String(content ?? "")
+    });
+  },
   openDashboard: async () => {
     const { invoke } = assertTauri();
     const url = await invoke("open_dashboard", {});

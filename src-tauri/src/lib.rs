@@ -26,7 +26,9 @@ pub fn run() {
       commands::uninstall_openclaw,
       commands::start_install,
       commands::cancel_task,
-      commands::exec_openclaw_collect
+      commands::exec_openclaw_collect,
+      commands::load_workspace_markdowns,
+      commands::save_workspace_markdown
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

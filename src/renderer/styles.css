@@ -541,6 +541,120 @@ button:disabled {
   line-height: 1.5;
 }
 
+
+.markdownEditorToolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.markdownEditorList {
+  display: grid;
+  gap: 12px;
+}
+
+.markdownEditorCard {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.markdownEditorAccordion {
+  overflow: hidden;
+}
+
+.markdownEditorSummary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.markdownEditorSummary::-webkit-details-marker {
+  display: none;
+}
+
+.markdownEditorSummary::after {
+  content: "▾";
+  color: var(--muted);
+  margin-left: auto;
+  transition: transform 0.2s ease;
+}
+
+.markdownEditorAccordion:not([open]) .markdownEditorSummary::after {
+  transform: rotate(-90deg);
+}
+
+.markdownEditorSummaryMain {
+  min-width: 0;
+  flex: 1;
+}
+
+.markdownEditorSummaryMeta {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.markdownEditorSummaryBadges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.markdownEditorBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.markdownEditorBadge.dirty {
+  color: var(--warning);
+  border-color: rgba(255, 159, 10, 0.35);
+  background: rgba(255, 159, 10, 0.12);
+}
+
+.markdownEditorBadge.missing {
+  color: var(--accent);
+  border-color: rgba(10, 132, 255, 0.35);
+  background: rgba(10, 132, 255, 0.12);
+}
+
+.markdownEditorBody {
+  padding: 0 16px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.markdownEditorMeta {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.markdownTextarea {
+  min-height: 160px;
+  resize: vertical;
+  overflow: hidden;
+  line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
 input[readonly] {
   cursor: default;
   opacity: 0.8;

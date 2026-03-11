@@ -1907,3 +1907,154 @@ pub async fn cancel_task(state: tauri::State<'_, TaskState>) -> Result<(), Strin
   state.cancel();
   Ok(())
 }
+
+const PREFERRED_WORKSPACE_MARKDOWN_FILES: [&str; 8] = [
+  "SOUL.md",
+  "USER.md",
+  "AGENTS.md",
+  "BOOTSTRAP.md",
+  "IDENTITY.md",
+  "TOOLS.md",
+  "HEARTBEAT.md",
+  "MEMORY.md",
+];
+
+#[derive(Debug, Serialize, Clone)]
+pub struct WorkspaceMarkdownDocument {
+  pub name: String,
+  pub path: String,
+  pub exists: bool,
+  pub content: String,
+}
+
+fn default_workspace_dir() -> PathBuf {
+  dirs::home_dir()
+    .map(|home| home.join(".openclaw").join("workspace"))
+    .unwrap_or_else(|| PathBuf::from(".openclaw").join("workspace"))
+}
+
+fn expand_home_path(value: &str) -> PathBuf {
+  let trimmed = value.trim();
+  if trimmed == "~" {
+    return dirs::home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
+  }
+  if let Some(rest) = trimmed.strip_prefix("~/") {
+    return dirs::home_dir()
+      .map(|home| home.join(rest))
+      .unwrap_or_else(|| PathBuf::from(trimmed));
+  }
+  PathBuf::from(trimmed)
+}
+
+fn resolve_workspace_dir() -> PathBuf {
+  if let Some(resolved) = resolve_openclaw() {
+    if let Ok(value) = run_openclaw_config_get_json(&resolved, "agents.defaults.workspace") {
+      if let Some(raw) = value.as_str() {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+          return expand_home_path(trimmed);
+        }
+      }
+    }
+  }
+  default_workspace_dir()
+}
+
+fn normalize_workspace_markdown_name(name: &str) -> Result<String, String> {
+  let trimmed = name.trim();
+  if trimmed.is_empty() {
+    return Err("Markdown 文件名不能为空。".into());
+  }
+  if trimmed.contains('/') || trimmed.contains('\\') {
+    return Err("Markdown 文件名不能包含路径分隔符。".into());
+  }
+  if !trimmed.to_ascii_lowercase().ends_with(".md") {
+    return Err("仅支持编辑 .md 文件。".into());
+  }
+  if trimmed == "." || trimmed == ".." || trimmed.contains("..") {
+    return Err("Markdown 文件名不合法。".into());
+  }
+  Ok(trimmed.to_string())
+}
+
+fn collect_workspace_markdown_names(workspace_dir: &Path) -> Result<Vec<String>, String> {
+  let mut names = Vec::new();
+  let mut seen = std::collections::HashSet::new();
+
+  for name in PREFERRED_WORKSPACE_MARKDOWN_FILES {
+    let normalized = normalize_workspace_markdown_name(name)?;
+    if seen.insert(normalized.clone()) {
+      names.push(normalized);
+    }
+  }
+
+  if !workspace_dir.exists() {
+    return Ok(names);
+  }
+
+  let mut discovered = Vec::new();
+  for entry in std::fs::read_dir(workspace_dir).map_err(|e| format!("读取 workspace 目录失败：{e}"))? {
+    let entry = entry.map_err(|e| format!("读取 workspace 条目失败：{e}"))?;
+    let path = entry.path();
+    if !path.is_file() {
+      continue;
+    }
+
+    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+      continue;
+    };
+
+    let Ok(normalized) = normalize_workspace_markdown_name(file_name) else {
+      continue;
+    };
+
+    if seen.insert(normalized.clone()) {
+      discovered.push(normalized);
+    }
+  }
+
+  discovered.sort();
+  names.extend(discovered);
+  Ok(names)
+}
+
+fn read_workspace_markdown_document(workspace_dir: &Path, name: &str) -> Result<WorkspaceMarkdownDocument, String> {
+  let normalized = normalize_workspace_markdown_name(name)?;
+  let path = workspace_dir.join(&normalized);
+  let exists = path.exists();
+  let content = if exists {
+    std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", normalized))?
+  } else {
+    String::new()
+  };
+
+  Ok(WorkspaceMarkdownDocument {
+    name: normalized,
+    path: path.to_string_lossy().to_string(),
+    exists,
+    content,
+  })
+}
+
+#[tauri::command]
+pub async fn load_workspace_markdowns() -> Result<Vec<WorkspaceMarkdownDocument>, String> {
+  let workspace_dir = resolve_workspace_dir();
+  let names = collect_workspace_markdown_names(&workspace_dir)?;
+  names
+    .iter()
+    .map(|name| read_workspace_markdown_document(&workspace_dir, name))
+    .collect()
+}
+
+#[tauri::command]
+pub async fn save_workspace_markdown(name: String, content: String) -> Result<WorkspaceMarkdownDocument, String> {
+  let normalized = normalize_workspace_markdown_name(&name)?;
+  let workspace_dir = resolve_workspace_dir();
+  std::fs::create_dir_all(&workspace_dir).map_err(|e| format!("创建 workspace 目录失败：{e}"))?;
+
+  let path = workspace_dir.join(&normalized);
+  let normalized_content = content.replace("\r\n", "\n");
+  std::fs::write(&path, normalized_content).map_err(|e| format!("写入 {} 失败：{e}", normalized))?;
+
+  read_workspace_markdown_document(&workspace_dir, &normalized)
+}
