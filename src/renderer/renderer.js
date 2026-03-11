@@ -59,6 +59,14 @@ const cfgGatewayAuthTokenField = el("cfgGatewayAuthTokenField");
 const cfgGatewayAuthToken = el("cfgGatewayAuthToken");
 const cfgGatewayAuthPasswordField = el("cfgGatewayAuthPasswordField");
 const cfgGatewayAuthPassword = el("cfgGatewayAuthPassword");
+const cfgGatewayTrustedProxiesField = el("cfgGatewayTrustedProxiesField");
+const cfgGatewayTrustedProxies = el("cfgGatewayTrustedProxies");
+const cfgGatewayTrustedProxyUserHeaderField = el("cfgGatewayTrustedProxyUserHeaderField");
+const cfgGatewayTrustedProxyUserHeader = el("cfgGatewayTrustedProxyUserHeader");
+const cfgGatewayTrustedProxyRequiredHeadersField = el("cfgGatewayTrustedProxyRequiredHeadersField");
+const cfgGatewayTrustedProxyRequiredHeaders = el("cfgGatewayTrustedProxyRequiredHeaders");
+const cfgGatewayTrustedProxyAllowUsersField = el("cfgGatewayTrustedProxyAllowUsersField");
+const cfgGatewayTrustedProxyAllowUsers = el("cfgGatewayTrustedProxyAllowUsers");
 const cfgDefaultModelPresets = el("cfgDefaultModelPresets");
 const workspaceMarkdownExpandBtn = el("workspaceMarkdownExpandBtn");
 const workspaceMarkdownCollapseBtn = el("workspaceMarkdownCollapseBtn");
@@ -568,6 +576,24 @@ async function runWorkspaceMarkdownSaveSequence(changes, { stageLabel } = {}) {
   }
 }
 
+function normalizeStringList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item ?? "").trim()).filter(Boolean);
+}
+
+function formatStringList(value) {
+  return normalizeStringList(value).join("\n");
+}
+
+function parseStringListInput(value) {
+  return Array.from(new Set(
+    String(value ?? "")
+      .split(/[\n\r,]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  ));
+}
+
 function getPrimaryModelRef(value) {
   if (typeof value === "string") return value.trim();
   if (value && typeof value === "object" && typeof value.primary === "string") {
@@ -668,6 +694,7 @@ function updateGatewayAuthVisibility() {
   const authMode = getInputValue(cfgGatewayAuthMode);
   const useToken = authMode === "token" || !authMode;
   const usePassword = authMode === "password";
+  const useTrustedProxy = authMode === "trusted-proxy";
 
   if (cfgGatewayAuthTokenField) {
     cfgGatewayAuthTokenField.classList.toggle("hidden", !useToken);
@@ -675,11 +702,35 @@ function updateGatewayAuthVisibility() {
   if (cfgGatewayAuthPasswordField) {
     cfgGatewayAuthPasswordField.classList.toggle("hidden", !usePassword);
   }
+  if (cfgGatewayTrustedProxiesField) {
+    cfgGatewayTrustedProxiesField.classList.toggle("hidden", !useTrustedProxy);
+  }
+  if (cfgGatewayTrustedProxyUserHeaderField) {
+    cfgGatewayTrustedProxyUserHeaderField.classList.toggle("hidden", !useTrustedProxy);
+  }
+  if (cfgGatewayTrustedProxyRequiredHeadersField) {
+    cfgGatewayTrustedProxyRequiredHeadersField.classList.toggle("hidden", !useTrustedProxy);
+  }
+  if (cfgGatewayTrustedProxyAllowUsersField) {
+    cfgGatewayTrustedProxyAllowUsersField.classList.toggle("hidden", !useTrustedProxy);
+  }
   if (cfgGatewayAuthToken) {
     cfgGatewayAuthToken.disabled = taskRunning || !useToken;
   }
   if (cfgGatewayAuthPassword) {
     cfgGatewayAuthPassword.disabled = taskRunning || !usePassword;
+  }
+  if (cfgGatewayTrustedProxies) {
+    cfgGatewayTrustedProxies.disabled = taskRunning || !useTrustedProxy;
+  }
+  if (cfgGatewayTrustedProxyUserHeader) {
+    cfgGatewayTrustedProxyUserHeader.disabled = taskRunning || !useTrustedProxy;
+  }
+  if (cfgGatewayTrustedProxyRequiredHeaders) {
+    cfgGatewayTrustedProxyRequiredHeaders.disabled = taskRunning || !useTrustedProxy;
+  }
+  if (cfgGatewayTrustedProxyAllowUsers) {
+    cfgGatewayTrustedProxyAllowUsers.disabled = taskRunning || !useTrustedProxy;
   }
 }
 
@@ -729,6 +780,18 @@ function queueIntegerConfigSet(seq, { label, path, rawValue, currentValue = "", 
 
   const nextValue = parsed.value;
   if (String(nextValue) === String(currentValue ?? "")) return;
+
+  seq.push({
+    args: ["config", "set", "--strict-json", path, JSON.stringify(nextValue)],
+    stageLabel,
+    logLine: `[config] 更新${label}...`
+  });
+}
+
+function queueStringArrayConfigSet(seq, { label, path, rawValue, currentValue = [], stageLabel }) {
+  const nextValue = parseStringListInput(rawValue);
+  const prevValue = normalizeStringList(currentValue);
+  if (JSON.stringify(nextValue) === JSON.stringify(prevValue)) return;
 
   seq.push({
     args: ["config", "set", "--strict-json", path, JSON.stringify(nextValue)],
@@ -841,6 +904,10 @@ async function loadConfigValues() {
     const gatewayAuthMode = getNestedValue(gatewayAuth, ["mode"]);
     const gatewayAuthToken = getNestedValue(gatewayAuth, ["token"]);
     const gatewayAuthPassword = getNestedValue(gatewayAuth, ["password"]);
+    const gatewayTrustedProxies = normalizeStringList(getNestedValue(gateway, ["trustedProxies"], []));
+    const gatewayTrustedProxyUserHeader = getNestedValue(gatewayAuth, ["trustedProxy", "userHeader"]);
+    const gatewayTrustedProxyRequiredHeaders = normalizeStringList(getNestedValue(gatewayAuth, ["trustedProxy", "requiredHeaders"], []));
+    const gatewayTrustedProxyAllowUsers = normalizeStringList(getNestedValue(gatewayAuth, ["trustedProxy", "allowUsers"], []));
 
     setConfigLoading(true, {
       title: "正在渲染配置中心…",
@@ -861,6 +928,10 @@ async function loadConfigValues() {
     setInputValue(cfgGatewayCustomBindHost, gatewayCustomBindHost);
     setInputValue(cfgGatewayPort, gatewayPort);
     setInputValue(cfgGatewayAuthMode, gatewayAuthMode);
+    setInputValue(cfgGatewayTrustedProxies, formatStringList(gatewayTrustedProxies));
+    setInputValue(cfgGatewayTrustedProxyUserHeader, gatewayTrustedProxyUserHeader);
+    setInputValue(cfgGatewayTrustedProxyRequiredHeaders, formatStringList(gatewayTrustedProxyRequiredHeaders));
+    setInputValue(cfgGatewayTrustedProxyAllowUsers, formatStringList(gatewayTrustedProxyAllowUsers));
 
     if (cfgApiKey) cfgApiKey.value = "";
     if (cfgGatewayAuthToken) cfgGatewayAuthToken.value = "";
@@ -901,6 +972,11 @@ async function loadConfigValues() {
       gatewayCustomBindHost: gatewayCustomBindHost === undefined || gatewayCustomBindHost === null ? "" : String(gatewayCustomBindHost),
       gatewayPort: gatewayPort === undefined || gatewayPort === null ? "" : String(gatewayPort),
       gatewayAuthMode: gatewayAuthMode === undefined || gatewayAuthMode === null ? "" : String(gatewayAuthMode),
+      gatewayTrustedProxies,
+      gatewayTrustedProxyUserHeader:
+        gatewayTrustedProxyUserHeader === undefined || gatewayTrustedProxyUserHeader === null ? "" : String(gatewayTrustedProxyUserHeader),
+      gatewayTrustedProxyRequiredHeaders,
+      gatewayTrustedProxyAllowUsers,
       hasGatewayAuthToken: typeof gatewayAuthToken === "string" && gatewayAuthToken.trim().length > 0,
       hasGatewayAuthPassword: typeof gatewayAuthPassword === "string" && gatewayAuthPassword.trim().length > 0
     };
@@ -1196,6 +1272,10 @@ if (configSaveBtn) {
         const newGatewayAuthMode = getInputValue(cfgGatewayAuthMode);
         const newGatewayAuthToken = getInputValue(cfgGatewayAuthToken);
         const newGatewayAuthPassword = getInputValue(cfgGatewayAuthPassword);
+        const newGatewayTrustedProxies = getInputValue(cfgGatewayTrustedProxies);
+        const newGatewayTrustedProxyUserHeader = getInputValue(cfgGatewayTrustedProxyUserHeader);
+        const newGatewayTrustedProxyRequiredHeaders = getInputValue(cfgGatewayTrustedProxyRequiredHeaders);
+        const newGatewayTrustedProxyAllowUsers = getInputValue(cfgGatewayTrustedProxyAllowUsers);
 
         const targetModelRef = newModel || loadedConfigValues.defaultModel || "";
         const { providerId: targetProviderId } = parseModelRef(targetModelRef);
@@ -1227,6 +1307,15 @@ if (configSaveBtn) {
 
         if (newGatewayAuthMode === "password" && !newGatewayAuthPassword && !loadedConfigValues.hasGatewayAuthPassword) {
           throw new Error("鉴权模式为 password 时，当前还没有已保存密码，请填写“鉴权密码”。");
+        }
+
+        if (newGatewayAuthMode === "trusted-proxy") {
+          if (parseStringListInput(newGatewayTrustedProxies).length === 0) {
+            throw new Error("鉴权模式为 trusted-proxy 时，请至少填写一个“可信代理 IP / CIDR”。");
+          }
+          if (!newGatewayTrustedProxyUserHeader) {
+            throw new Error("鉴权模式为 trusted-proxy 时，必须填写“用户身份 Header”。");
+          }
         }
 
         queueTextConfigSet(seq, {
@@ -1367,13 +1456,37 @@ if (configSaveBtn) {
           strictJson: true,
           secret: true
         });
+        queueStringArrayConfigSet(seq, {
+          label: "可信代理 IP / CIDR",
+          path: "gateway.trustedProxies",
+          rawValue: newGatewayTrustedProxies,
+          currentValue: loadedConfigValues.gatewayTrustedProxies,
+          stageLabel: "更新可信代理列表…"
+        });
+        queueTextConfigSet(seq, {
+          label: "用户身份 Header",
+          path: "gateway.auth.trustedProxy.userHeader",
+          value: newGatewayTrustedProxyUserHeader,
+          currentValue: loadedConfigValues.gatewayTrustedProxyUserHeader,
+          stageLabel: "更新用户身份 Header…"
+        });
+        queueStringArrayConfigSet(seq, {
+          label: "必需 Header",
+          path: "gateway.auth.trustedProxy.requiredHeaders",
+          rawValue: newGatewayTrustedProxyRequiredHeaders,
+          currentValue: loadedConfigValues.gatewayTrustedProxyRequiredHeaders,
+          stageLabel: "更新必需 Header…"
+        });
+        queueStringArrayConfigSet(seq, {
+          label: "允许用户列表",
+          path: "gateway.auth.trustedProxy.allowUsers",
+          rawValue: newGatewayTrustedProxyAllowUsers,
+          currentValue: loadedConfigValues.gatewayTrustedProxyAllowUsers,
+          stageLabel: "更新允许用户列表…"
+        });
 
         if (newGatewayMode === "remote") {
           deferredNotices.push("[警告] `gateway.mode=remote` 通常还需要补充 `gateway.remote.*`，当前页面暂未覆盖这些字段。");
-        }
-
-        if (newGatewayAuthMode === "trusted-proxy") {
-          deferredNotices.push("[警告] `trusted-proxy` 还需要配置 `gateway.trustedProxies` 和 `gateway.auth.trustedProxy.*`，请确认已手工补齐。");
         }
 
         const markdownChanges = collectWorkspaceMarkdownChanges();
