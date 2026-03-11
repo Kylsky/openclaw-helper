@@ -130,10 +130,12 @@ ipcMain.handle("open-wizard", async () => {
 
   if (process.platform === "darwin") {
     const escapeAppleScript = (value) => String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    const shellCmd = openclawCmd.includes(" ") ? `"${openclawCmd}" onboard` : `${openclawCmd} onboard`;
+    const shellCmd = openclawCmd.includes(" ")
+      ? `"${openclawCmd}" onboard`
+      : `${openclawCmd} onboard`;
     const script = [
       'tell application "Terminal"',
-      'activate',
+      "activate",
       `do script "${escapeAppleScript(shellCmd)}"`,
       "end tell"
     ].join("\n");

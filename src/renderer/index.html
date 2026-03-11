@@ -10,10 +10,9 @@
 
 <body>
   <div class="app">
-    <header class="header">
-      <div class="title">OpenClaw 助手</div>
-      <div id="subtitle" class="subtitle">准备中…</div>
-    </header>
+    <!-- <header class="header">
+        <h1 class="title">OpenClaw 助手</h1>
+      </header> -->
 
     <section id="installerCard" class="card hidden">
       <h2>一键安装</h2>
@@ -37,73 +36,112 @@
 
     <section id="dashboardCard" class="card hidden">
       <h2>控制台</h2>
-      <div class="row">
-        <div id="versionPill" class="pill">version: -</div>
-        <div id="gatewayStatusPill" class="pill">网关：检测中…</div>
-        <button id="refreshBtn" class="secondary" type="button">刷新</button>
-      </div>
-      <div class="actions">
-        <button id="openDashboardBtn" type="button">打开控制台</button>
+      <div class="row" style="justify-content: space-between">
+        <div class="row">
+          <div id="versionPill" class="pill">version: -</div>
+          <div id="gatewayStatusPill" class="pill">网关：检测中…</div>
+          <button id="refreshBtn" class="icon-btn" style="
+                padding: 6px 12px;
+                font-size: 13px;
+                background: transparent;
+                border: 1px solid var(--border);
+                border-radius: 20px;
+              " type="button">
+            ↻
+          </button>
+        </div>
+        <button id="openDashboardBtn" type="button">进入控制台</button>
       </div>
       <div class="featureGrid">
         <div class="featureCard">
-          <div class="featureTitle">网关服务</div>
-          <div class="featureDesc">用于消息、助手与控制台的本地服务。</div>
-          <div class="featureActions">
-            <button id="gatewayStartBtn" type="button">启动</button>
-            <button id="gatewayStopBtn" class="secondary" type="button">停止</button>
-            <button id="gatewayStatusBtn" class="secondary" type="button">检查状态</button>
+          <div class="featureHeader">
+            <div class="featureTitle">网关服务</div>
+            <div class="featureActions">
+              <button id="gatewayRestartBtn" class="secondary" style="padding: 6px 12px; font-size: 12px" type="button">
+                重启
+              </button>
+              <button id="gatewayStopBtn" class="secondary" style="padding: 6px 12px; font-size: 12px" type="button">
+                停止
+              </button>
+              <button id="gatewayStartBtn" style="padding: 6px 12px; font-size: 12px" type="button">
+                启动
+              </button>
+            </div>
           </div>
-        </div>
-
-
-
-        <div class="featureCard">
-          <div class="featureTitle">健康检查</div>
-          <div class="featureDesc">检查配置与服务状态，并尝试自动修复常见问题。</div>
-          <div class="featureActions">
-            <button id="doctorBtn" type="button">一键修复</button>
-          </div>
+          <div class="featureDesc">后台本地服务，提供网络通讯支持。</div>
         </div>
 
         <div class="featureCard">
-          <div class="featureTitle">更新</div>
-          <div class="featureDesc">切换/更新到稳定版、测试版或开发版。</div>
-          <div class="featureForm">
-            <select id="updateChannel">
-              <option value="stable" selected>稳定版（stable）</option>
-              <option value="beta">测试版（beta）</option>
-              <option value="dev">开发版（dev）</option>
-            </select>
+          <div class="featureHeader">
+            <div class="featureTitle">健康检查</div>
+            <div class="featureActions">
+              <button id="doctorBtn" class="secondary" style="padding: 6px 12px; font-size: 12px" type="button">
+                一键修复
+              </button>
+            </div>
           </div>
-          <div class="featureActions">
-            <button id="updateBtn" type="button">更新</button>
+          <div class="featureDesc" style="margin-bottom: auto">
+            检查配置与服务状态，修复常见问题。
           </div>
         </div>
 
         <div class="featureCard">
-          <div class="featureTitle">卸载</div>
-          <div class="featureDesc">调用 openclaw 自带卸载命令：openclaw uninstall --yes。</div>
-          <div class="featureActions">
-            <button id="uninstallBtn" class="secondary" type="button">卸载 OpenClaw</button>
+          <div class="featureHeader">
+            <div class="featureTitle">检查更新</div>
+            <div class="featureActions">
+              <button id="updateBtn" class="secondary" style="padding: 6px 12px; font-size: 12px" type="button">
+                更新
+              </button>
+            </div>
+          </div>
+          <div class="featureDesc">当前选用版本频道：</div>
+          <select id="updateChannel" style="padding: 8px 12px; font-size: 13px; margin-top: auto">
+            <option value="stable" selected>稳定版（stable）</option>
+            <option value="beta">测试版（beta）</option>
+            <option value="dev">开发版（dev）</option>
+          </select>
+        </div>
+
+        <div class="featureCard">
+          <div class="featureHeader">
+            <div class="featureTitle">卸载及清理</div>
+            <div class="featureActions">
+              <button id="uninstallBtn" class="danger" style="
+                    padding: 6px 12px;
+                    font-size: 12px;
+                    background: rgba(255, 59, 48, 0.1);
+                    color: var(--danger);
+                    border: 1px solid rgba(255, 59, 48, 0.3);
+                    box-shadow: none;
+                  " type="button">
+                彻底卸载
+              </button>
+            </div>
+          </div>
+          <div class="featureDesc" style="margin-bottom: auto">
+            清理服务和命令行工具，不可逆转。
           </div>
         </div>
       </div>
     </section>
 
     <section class="card">
-      <h2>进度</h2>
-      <div id="stageText" class="stage">等待开始…</div>
-      <div class="progress">
-        <div id="progressBar" class="progressBar" style="width: 0%"></div>
-      </div>
-      <div id="progressText" class="progressText">0%</div>
       <div class="row progressRow">
-        <button id="stopBtn" class="secondary" type="button" disabled>取消当前任务</button>
-        <label class="toggle inline">
+        <h2 style="margin: 0">进度</h2>
+        <label class="toggle inline" style="margin-left: auto">
           <input id="showLogs" type="checkbox" checked />
           显示日志
         </label>
+      </div>
+      <div id="stageText" class="stage" style="margin-top: 12px">等待开始…</div>
+      <div class="progress">
+        <div id="progressBar" class="progressBar" style="width: 0%"></div>
+      </div>
+      <div class="row progressRow" style="margin-top: 8px">
+        <div id="progressText" class="progressText" style="margin: 0">0%</div>
+        <button id="stopBtn" class="secondary" style="padding: 6px 14px; font-size: 13px" type="button" disabled>
+          取消当前任务
+        </button>
       </div>
     </section>
 

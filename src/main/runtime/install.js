@@ -69,7 +69,12 @@ function createBaseEnv() {
     ];
     // Prefer well-known system/brew locations over user shell shims (e.g. nvm),
     // to make the installer deterministic even when the parent shell modifies PATH.
-    env.PATH = mergePathEntries({ existingPath: env.PATH, extraEntries: extra, separator: ":", extraFirst: true });
+    env.PATH = mergePathEntries({
+      existingPath: env.PATH,
+      extraEntries: extra,
+      separator: ":",
+      extraFirst: true
+    });
   }
 
   return env;
@@ -100,7 +105,9 @@ async function taskkillWindowsTreeBestEffort({ pid, env, signal, onLog }) {
 }
 
 function isDisableKeyword(value) {
-  const lower = String(value ?? "").trim().toLowerCase();
+  const lower = String(value ?? "")
+    .trim()
+    .toLowerCase();
   return ["off", "false", "none", "direct", "disable", "disabled", "0"].includes(lower);
 }
 
@@ -115,7 +122,7 @@ function validateNpmPackageName(name) {
   if (value.includes("..")) throw new Error("openclaw 包名不合法");
   if (value.includes("//")) throw new Error("openclaw 包名不合法");
   if (value.includes("\\")) throw new Error("openclaw 包名不合法");
-  if (value.includes("'") || value.includes("\"") || value.includes("`")) {
+  if (value.includes("'") || value.includes('"') || value.includes("`")) {
     throw new Error("openclaw 包名不合法");
   }
   return value;
@@ -123,9 +130,13 @@ function validateNpmPackageName(name) {
 
 function validateOptions(options) {
   const autoInstall = options?.autoInstall !== false;
-  const openclawPackage = validateNpmPackageName(options?.openclawPackage ?? DEFAULT_OPENCLAW_PACKAGE);
+  const openclawPackage = validateNpmPackageName(
+    options?.openclawPackage ?? DEFAULT_OPENCLAW_PACKAGE
+  );
 
-  const nodeChannel = String(options?.nodeChannel ?? "lts").trim().toLowerCase();
+  const nodeChannel = String(options?.nodeChannel ?? "lts")
+    .trim()
+    .toLowerCase();
   if (!["lts", "latest"].includes(nodeChannel)) {
     throw new Error("Node 安装通道无效（仅支持 lts / latest）");
   }
@@ -287,7 +298,15 @@ async function runWindowsShim({ baseCommand, args, env, signal, onLog, collectOu
   }
 
   try {
-    return await runProcess({ command: baseCommand, args, env, signal, onLog, shell: true, collectOutput });
+    return await runProcess({
+      command: baseCommand,
+      args,
+      env,
+      signal,
+      onLog,
+      shell: true,
+      collectOutput
+    });
   } catch (error) {
     throw lastNotFound ?? error;
   }
@@ -400,13 +419,17 @@ function getWingetArchitectureArg(osArch) {
 }
 
 function parseSemverMajor(text) {
-  const match = String(text ?? "").trim().match(/(\d+)\.(\d+)\.(\d+)/);
+  const match = String(text ?? "")
+    .trim()
+    .match(/(\d+)\.(\d+)\.(\d+)/);
   if (!match) return null;
   return Number(match[1]);
 }
 
 function parseSemverTuple(text) {
-  const match = String(text ?? "").trim().match(/(\d+)\.(\d+)\.(\d+)/);
+  const match = String(text ?? "")
+    .trim()
+    .match(/(\d+)\.(\d+)\.(\d+)/);
   if (!match) return null;
   return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
@@ -438,7 +461,9 @@ async function getNodeRuntimeInfo({ env, signal, onLog }) {
 
   try {
     const v = await runProcess({ command: "node", args: ["-v"], env, signal, collectOutput: true });
-    versionText = String(v.stdout ?? "").trim().replace(/^v/, "");
+    versionText = String(v.stdout ?? "")
+      .trim()
+      .replace(/^v/, "");
     major = parseSemverMajor(versionText);
   } catch {
     versionText = null;
@@ -446,7 +471,13 @@ async function getNodeRuntimeInfo({ env, signal, onLog }) {
   }
 
   try {
-    const a = await runProcess({ command: "node", args: ["-p", "process.arch"], env, signal, collectOutput: true });
+    const a = await runProcess({
+      command: "node",
+      args: ["-p", "process.arch"],
+      env,
+      signal,
+      collectOutput: true
+    });
     arch = splitLines(`${a.stdout ?? ""}\n${a.stderr ?? ""}`)[0]?.trim() ?? null;
   } catch {
     arch = null;
@@ -454,7 +485,13 @@ async function getNodeRuntimeInfo({ env, signal, onLog }) {
 
   if (process.platform === "win32") {
     try {
-      const w = await runProcess({ command: "where", args: ["node"], env, signal, collectOutput: true });
+      const w = await runProcess({
+        command: "where",
+        args: ["node"],
+        env,
+        signal,
+        collectOutput: true
+      });
       whereFirst = splitLines(`${w.stdout ?? ""}\n${w.stderr ?? ""}`)[0]?.trim() ?? null;
     } catch {
       whereFirst = null;
@@ -502,7 +539,10 @@ async function resolveNpmGlobalPrefix({ env, signal, onLog }) {
 
 async function resolveOpenclawExecution({ env, signal, onLog } = {}) {
   const baseEnv = env ?? createBaseEnv();
-  const resolvedEnv = process.platform === "win32" ? await refreshWindowsPath({ env: baseEnv, signal, onLog }) : baseEnv;
+  const resolvedEnv =
+    process.platform === "win32"
+      ? await refreshWindowsPath({ env: baseEnv, signal, onLog })
+      : baseEnv;
 
   // 1) Fast path: already in PATH.
   const hasOpenclaw = await commandExists("openclaw", { env: resolvedEnv, signal, onLog });
@@ -510,8 +550,20 @@ async function resolveOpenclawExecution({ env, signal, onLog } = {}) {
     try {
       const pathResult =
         process.platform === "win32"
-          ? await runProcess({ command: "where", args: ["openclaw"], env: resolvedEnv, signal, collectOutput: true })
-          : await runProcess({ command: "/usr/bin/which", args: ["openclaw"], env: resolvedEnv, signal, collectOutput: true });
+          ? await runProcess({
+              command: "where",
+              args: ["openclaw"],
+              env: resolvedEnv,
+              signal,
+              collectOutput: true
+            })
+          : await runProcess({
+              command: "/usr/bin/which",
+              args: ["openclaw"],
+              env: resolvedEnv,
+              signal,
+              collectOutput: true
+            });
       const first = splitLines(`${pathResult.stdout ?? ""}\n${pathResult.stderr ?? ""}`)[0]?.trim();
       if (first) return { command: first, env: resolvedEnv, source: "path" };
     } catch {
@@ -524,7 +576,8 @@ async function resolveOpenclawExecution({ env, signal, onLog } = {}) {
   if (process.platform === "darwin") {
     const brewCandidates = ["/opt/homebrew/bin/openclaw", "/usr/local/bin/openclaw"];
     for (const candidate of brewCandidates) {
-      if (fileExistsSync(candidate)) return { command: candidate, env: resolvedEnv, source: "brew_bin" };
+      if (fileExistsSync(candidate))
+        return { command: candidate, env: resolvedEnv, source: "brew_bin" };
     }
   }
 
@@ -533,7 +586,10 @@ async function resolveOpenclawExecution({ env, signal, onLog } = {}) {
     const prefix = await resolveNpmGlobalPrefix({ env: resolvedEnv, signal, onLog });
     if (prefix) {
       const binDir = path.join(prefix, "bin");
-      const candidate = process.platform === "win32" ? path.join(prefix, "openclaw.cmd") : path.join(binDir, "openclaw");
+      const candidate =
+        process.platform === "win32"
+          ? path.join(prefix, "openclaw.cmd")
+          : path.join(binDir, "openclaw");
 
       const separator = process.platform === "win32" ? ";" : ":";
       const mergedPath = mergePathEntries({
@@ -543,7 +599,8 @@ async function resolveOpenclawExecution({ env, signal, onLog } = {}) {
       });
       const envWithBin = { ...resolvedEnv, PATH: mergedPath };
 
-      if (fileExistsSync(candidate)) return { command: candidate, env: envWithBin, source: "npm_prefix" };
+      if (fileExistsSync(candidate))
+        return { command: candidate, env: envWithBin, source: "npm_prefix" };
 
       // If file isn't present but PATH includes it now, still attempt direct execution.
       const hasAfterPath = await commandExists("openclaw", { env: envWithBin, signal, onLog });
@@ -692,7 +749,10 @@ async function ensureNvm({ env, signal, onLog, options, context }) {
 
   await fs.mkdir(path.join(os.homedir(), ".nvm"), { recursive: true });
 
-  nvmSourcePath = await getMacNvmSourcePath({ brewPath: resolvedBrew === "brew" ? null : brewPath, env: context.env });
+  nvmSourcePath = await getMacNvmSourcePath({
+    brewPath: resolvedBrew === "brew" ? null : brewPath,
+    env: context.env
+  });
   if (!nvmSourcePath) {
     nvmSourcePath = await getMacNvmSourcePath({ brewPath, env: context.env });
   }
@@ -723,7 +783,9 @@ async function ensureNode({ env, signal, onLog, options, context }) {
     const nodeOk = Boolean(nodeInfo) && hasNpm && nodeOkByVersion && nodeOkByArch;
 
     if (nodeOk) {
-      onLog?.(`已检测到 Node.js / npm（Windows, major=${nodeInfo.major}, arch=${nodeInfo.arch ?? "unknown"}）`);
+      onLog?.(
+        `已检测到 Node.js / npm（Windows, major=${nodeInfo.major}, arch=${nodeInfo.arch ?? "unknown"}）`
+      );
       return;
     }
 
@@ -803,7 +865,9 @@ async function ensureNode({ env, signal, onLog, options, context }) {
     });
 
     const afterHasNpm = await commandExists("npm", { env: context.env, signal });
-    const afterNodeInfo = await getNodeRuntimeInfo({ env: context.env, signal, onLog }).catch(() => null);
+    const afterNodeInfo = await getNodeRuntimeInfo({ env: context.env, signal, onLog }).catch(
+      () => null
+    );
     const afterOkByVersion = afterNodeInfo?.major != null && afterNodeInfo.major >= MIN_NODE_MAJOR;
     const afterOkByArch = osArch === "x64" ? afterNodeInfo?.arch === "x64" : true;
 
@@ -821,7 +885,9 @@ async function ensureNode({ env, signal, onLog, options, context }) {
     }
 
     const finalHasNpm = await commandExists("npm", { env: context.env, signal });
-    const finalNodeInfo = await getNodeRuntimeInfo({ env: context.env, signal, onLog }).catch(() => null);
+    const finalNodeInfo = await getNodeRuntimeInfo({ env: context.env, signal, onLog }).catch(
+      () => null
+    );
     const finalOkByVersion = finalNodeInfo?.major != null && finalNodeInfo.major >= MIN_NODE_MAJOR;
     const finalOkByArch = osArch === "x64" ? finalNodeInfo?.arch === "x64" : true;
 
@@ -840,7 +906,9 @@ async function ensureNode({ env, signal, onLog, options, context }) {
       );
     }
 
-    onLog?.(`Node.js 安装完成（Windows, major=${finalNodeInfo.major}, arch=${finalNodeInfo.arch ?? "unknown"}）`);
+    onLog?.(
+      `Node.js 安装完成（Windows, major=${finalNodeInfo.major}, arch=${finalNodeInfo.arch ?? "unknown"}）`
+    );
     return;
   }
 
@@ -850,8 +918,16 @@ async function ensureNode({ env, signal, onLog, options, context }) {
   let currentMajor = null;
   if (hasNode) {
     try {
-      const result = await runProcess({ command: "node", args: ["-v"], env, signal, collectOutput: true });
-      currentMajor = parseSemverMajor(String(result.stdout ?? "").replace(/^v/, "")) ?? parseSemverMajor(result.stdout ?? "");
+      const result = await runProcess({
+        command: "node",
+        args: ["-v"],
+        env,
+        signal,
+        collectOutput: true
+      });
+      currentMajor =
+        parseSemverMajor(String(result.stdout ?? "").replace(/^v/, "")) ??
+        parseSemverMajor(result.stdout ?? "");
     } catch {
       currentMajor = null;
     }
@@ -892,9 +968,21 @@ async function ensureNode({ env, signal, onLog, options, context }) {
   }
 
   if (hasBrewNode) {
-    await runProcess({ command: brewCmd, args: ["upgrade", "node"], env: context.env, signal, onLog }).catch(() => null);
+    await runProcess({
+      command: brewCmd,
+      args: ["upgrade", "node"],
+      env: context.env,
+      signal,
+      onLog
+    }).catch(() => null);
   } else {
-    await runProcess({ command: brewCmd, args: ["install", "node"], env: context.env, signal, onLog });
+    await runProcess({
+      command: brewCmd,
+      args: ["install", "node"],
+      env: context.env,
+      signal,
+      onLog
+    });
   }
 
   const nowHasNode = await commandExists("node", { env: context.env, signal });
@@ -903,7 +991,13 @@ async function ensureNode({ env, signal, onLog, options, context }) {
     throw new Error("Node.js 安装完成但未检测到 node/npm（可能需要重启终端/安装器）。");
   }
 
-  const after = await runProcess({ command: "node", args: ["-v"], env: context.env, signal, collectOutput: true });
+  const after = await runProcess({
+    command: "node",
+    args: ["-v"],
+    env: context.env,
+    signal,
+    collectOutput: true
+  });
   const major = parseSemverMajor(String(after.stdout ?? "").replace(/^v/, "")) ?? null;
   if (!major || major < MIN_NODE_MAJOR) {
     throw new Error(
@@ -960,7 +1054,13 @@ async function ensureGit({ env, signal, onLog, options, context }) {
 
   if (brewCmd) {
     onLog?.("正在通过 brew 安装 Git…");
-    await runProcess({ command: brewCmd, args: ["install", "git"], env: context.env, signal, onLog });
+    await runProcess({
+      command: brewCmd,
+      args: ["install", "git"],
+      env: context.env,
+      signal,
+      onLog
+    });
     const nowHasGit = await commandExists("git", { env: context.env, signal });
     if (!nowHasGit) {
       throw new Error("Git 安装完成但未检测到 git（可能需要重启终端/安装器）。");
@@ -971,7 +1071,9 @@ async function ensureGit({ env, signal, onLog, options, context }) {
 
   // No Homebrew: fall back to Xcode Command Line Tools (git is provided by Apple).
   if (!options.autoInstall) {
-    throw new Error("未检测到 Git。请先安装 Xcode Command Line Tools（或手动安装 Git），然后重试。");
+    throw new Error(
+      "未检测到 Git。请先安装 Xcode Command Line Tools（或手动安装 Git），然后重试。"
+    );
   }
 
   onLog?.("未检测到 Homebrew，尝试触发 Xcode Command Line Tools 安装（将弹出系统提示）…");
@@ -1003,23 +1105,43 @@ async function verifyEnvironment({ env, signal, onLog, options: _options, contex
     await runProcess({ command: "nvm", args: ["version"], env, signal, onLog }).catch(async () => {
       await runProcess({ command: "nvm", args: ["--version"], env, signal, onLog });
     });
-    const nodeResult = await runProcess({ command: "node", args: ["-v"], env, signal, onLog, collectOutput: true });
-    const versionText = String(nodeResult.stdout ?? "").trim().replace(/^v/, "");
+    const nodeResult = await runProcess({
+      command: "node",
+      args: ["-v"],
+      env,
+      signal,
+      onLog,
+      collectOutput: true
+    });
+    const versionText = String(nodeResult.stdout ?? "")
+      .trim()
+      .replace(/^v/, "");
     const major = parseSemverMajor(versionText);
     const osArch = getWindowsOsArch(env);
     let nodeArch = null;
     try {
-      const archResult = await runProcess({ command: "node", args: ["-p", "process.arch"], env, signal, collectOutput: true });
-      nodeArch = splitLines(`${archResult.stdout ?? ""}\n${archResult.stderr ?? ""}`)[0]?.trim() ?? null;
+      const archResult = await runProcess({
+        command: "node",
+        args: ["-p", "process.arch"],
+        env,
+        signal,
+        collectOutput: true
+      });
+      nodeArch =
+        splitLines(`${archResult.stdout ?? ""}\n${archResult.stderr ?? ""}`)[0]?.trim() ?? null;
     } catch {
       nodeArch = null;
     }
 
     if (!major || major < MIN_NODE_MAJOR) {
-      throw new Error(`Node.js 版本不满足要求（检测到：${versionText || "unknown"}，需要 >= ${MIN_NODE_MAJOR}）。`);
+      throw new Error(
+        `Node.js 版本不满足要求（检测到：${versionText || "unknown"}，需要 >= ${MIN_NODE_MAJOR}）。`
+      );
     }
     if (osArch === "x64" && nodeArch && nodeArch !== "x64") {
-      throw new Error(`Node.js 架构不匹配（系统为 x64，但当前 node arch=${nodeArch}）。请安装/切换到 x64 Node。`);
+      throw new Error(
+        `Node.js 架构不匹配（系统为 x64，但当前 node arch=${nodeArch}）。请安装/切换到 x64 Node。`
+      );
     }
     await runWindowsShim({ baseCommand: "npm", args: ["-v"], env, signal, onLog });
     await runProcess({ command: "git", args: ["--version"], env, signal, onLog });
@@ -1027,11 +1149,22 @@ async function verifyEnvironment({ env, signal, onLog, options: _options, contex
     return;
   }
 
-  const nodeResult = await runProcess({ command: "node", args: ["-v"], env, signal, onLog, collectOutput: true });
-  const versionText = String(nodeResult.stdout ?? "").trim().replace(/^v/, "");
+  const nodeResult = await runProcess({
+    command: "node",
+    args: ["-v"],
+    env,
+    signal,
+    onLog,
+    collectOutput: true
+  });
+  const versionText = String(nodeResult.stdout ?? "")
+    .trim()
+    .replace(/^v/, "");
   const major = parseSemverMajor(versionText);
   if (!major || major < MIN_NODE_MAJOR) {
-    throw new Error(`Node.js 版本不满足要求（检测到：${versionText || "unknown"}，需要 >= ${MIN_NODE_MAJOR}）。`);
+    throw new Error(
+      `Node.js 版本不满足要求（检测到：${versionText || "unknown"}，需要 >= ${MIN_NODE_MAJOR}）。`
+    );
   }
 
   await runProcess({ command: "npm", args: ["-v"], env, signal, onLog });
@@ -1076,8 +1209,16 @@ async function installOpenclaw({ env, signal, onLog, options, context: _context 
       },
       { onLog, githubMirror: options.githubMirror }
     );
-    onLog?.("NODE_LLAMA_CPP_SKIP_DOWNLOAD=1（跳过 node-llama-cpp 安装期下载/编译，提升 Windows 安装成功率）");
-    await runWindowsShim({ baseCommand: "npm", args: ["install", "-g", options.openclawPackage], env: installEnv, signal, onLog });
+    onLog?.(
+      "NODE_LLAMA_CPP_SKIP_DOWNLOAD=1（跳过 node-llama-cpp 安装期下载/编译，提升 Windows 安装成功率）"
+    );
+    await runWindowsShim({
+      baseCommand: "npm",
+      args: ["install", "-g", options.openclawPackage],
+      env: installEnv,
+      signal,
+      onLog
+    });
 
     onLog?.("全局安装完成，尝试验证 openclaw 命令…");
     try {
@@ -1089,7 +1230,13 @@ async function installOpenclaw({ env, signal, onLog, options, context: _context 
     return;
   }
 
-  await runProcess({ command: "npm", args: ["install", "-g", options.openclawPackage], env, signal, onLog });
+  await runProcess({
+    command: "npm",
+    args: ["install", "-g", options.openclawPackage],
+    env,
+    signal,
+    onLog
+  });
 
   const verify = async () => {
     const resolved = await resolveOpenclawExecution({ env, signal, onLog });
@@ -1113,7 +1260,13 @@ async function installOpenclaw({ env, signal, onLog, options, context: _context 
   if (ok) return;
 
   onLog?.("未能直接运行 openclaw，尝试修复（npm --force 重新生成全局命令链接）…");
-  await runProcess({ command: "npm", args: ["install", "-g", options.openclawPackage, "--force"], env, signal, onLog });
+  await runProcess({
+    command: "npm",
+    args: ["install", "-g", options.openclawPackage, "--force"],
+    env,
+    signal,
+    onLog
+  });
 
   const ok2 = await verify();
   if (ok2) return;
@@ -1128,11 +1281,18 @@ async function installOpenclaw({ env, signal, onLog, options, context: _context 
   );
 }
 
-async function uninstallOpenclaw({ signal, onLog, openclawPackage: _openclawPackage = DEFAULT_OPENCLAW_PACKAGE } = {}) {
+async function uninstallOpenclaw({
+  signal,
+  onLog,
+  openclawPackage: _openclawPackage = DEFAULT_OPENCLAW_PACKAGE
+} = {}) {
   const openclawPackage = validateNpmPackageName(_openclawPackage);
 
   const baseEnv = createBaseEnv();
-  const env = process.platform === "win32" ? await refreshWindowsPath({ env: baseEnv, signal, onLog }) : baseEnv;
+  const env =
+    process.platform === "win32"
+      ? await refreshWindowsPath({ env: baseEnv, signal, onLog })
+      : baseEnv;
 
   const resolved = await resolveOpenclawExecution({ env, signal, onLog });
   const resolvedPath =
@@ -1289,7 +1449,11 @@ async function uninstallOpenclaw({ signal, onLog, openclawPackage: _openclawPack
       const brewCmd = await getBrewCommand();
       if (brewCmd) {
         onLog?.(`${brewCmd} uninstall openclaw`);
-        const result = await runSimple({ command: brewCmd, args: ["uninstall", "openclaw"], prefix: "[brew]" });
+        const result = await runSimple({
+          command: brewCmd,
+          args: ["uninstall", "openclaw"],
+          prefix: "[brew]"
+        });
         attempts.push({ kind: "brew", result });
         summarizeAttempt("brew", result);
         // Even if brew uninstall fails, keep going: the binary in /opt/homebrew/bin can be from npm.
@@ -1310,7 +1474,8 @@ async function uninstallOpenclaw({ signal, onLog, openclawPackage: _openclawPack
     };
 
     const nvmNpm =
-      resolvedPath && resolvedPath.includes(`${path.sep}.nvm${path.sep}versions${path.sep}node${path.sep}`)
+      resolvedPath &&
+      resolvedPath.includes(`${path.sep}.nvm${path.sep}versions${path.sep}node${path.sep}`)
         ? path.join(path.dirname(resolvedPath), process.platform === "win32" ? "npm.cmd" : "npm")
         : null;
 
@@ -1359,7 +1524,9 @@ async function uninstallOpenclaw({ signal, onLog, openclawPackage: _openclawPack
     }
 
     if (stillResolved?.command) onLog?.(`CLI 仍存在：${stillResolved.command}`);
-    onLog?.("已尝试移除 CLI，但检测到系统中仍有 openclaw（可能来自其它 Node/路径）。如需彻底清理，请运行诊断并根据输出卸载对应来源。");
+    onLog?.(
+      "已尝试移除 CLI，但检测到系统中仍有 openclaw（可能来自其它 Node/路径）。如需彻底清理，请运行诊断并根据输出卸载对应来源。"
+    );
   };
 
   // 1) Always run OpenClaw's own uninstaller (service/state/workspace). Non-interactive.
@@ -1402,22 +1569,32 @@ async function runInstall({ signal, options, onProgress, onLog }) {
   const steps =
     process.platform === "win32"
       ? [
-          { id: "nvm", title: "安装 nvm", run: () => ensureNvm({ env: context.env, signal, onLog, options: validated, context }) },
+          {
+            id: "nvm",
+            title: "安装 nvm",
+            run: () => ensureNvm({ env: context.env, signal, onLog, options: validated, context })
+          },
           {
             id: "node",
             title: "安装 Node.js",
             run: () => ensureNode({ env: context.env, signal, onLog, options: validated, context })
           },
-          { id: "git", title: "安装 Git", run: () => ensureGit({ env: context.env, signal, onLog, options: validated, context }) },
+          {
+            id: "git",
+            title: "安装 Git",
+            run: () => ensureGit({ env: context.env, signal, onLog, options: validated, context })
+          },
           {
             id: "verify",
             title: "环境校验",
-            run: () => verifyEnvironment({ env: context.env, signal, onLog, options: validated, context })
+            run: () =>
+              verifyEnvironment({ env: context.env, signal, onLog, options: validated, context })
           },
           {
             id: "openclaw",
             title: "安装 openclaw",
-            run: () => installOpenclaw({ env: context.env, signal, onLog, options: validated, context })
+            run: () =>
+              installOpenclaw({ env: context.env, signal, onLog, options: validated, context })
           }
         ]
       : [
@@ -1426,16 +1603,22 @@ async function runInstall({ signal, options, onProgress, onLog }) {
             title: "安装 Node.js",
             run: () => ensureNode({ env: context.env, signal, onLog, options: validated, context })
           },
-          { id: "git", title: "安装 Git", run: () => ensureGit({ env: context.env, signal, onLog, options: validated, context }) },
+          {
+            id: "git",
+            title: "安装 Git",
+            run: () => ensureGit({ env: context.env, signal, onLog, options: validated, context })
+          },
           {
             id: "verify",
             title: "环境校验",
-            run: () => verifyEnvironment({ env: context.env, signal, onLog, options: validated, context })
+            run: () =>
+              verifyEnvironment({ env: context.env, signal, onLog, options: validated, context })
           },
           {
             id: "openclaw",
             title: "安装 openclaw",
-            run: () => installOpenclaw({ env: context.env, signal, onLog, options: validated, context })
+            run: () =>
+              installOpenclaw({ env: context.env, signal, onLog, options: validated, context })
           }
         ];
 
@@ -1475,22 +1658,34 @@ function parseVersionFromOutput(text) {
 async function getOpenclawInfo({ withHelp = false } = {}) {
   const env = createBaseEnv();
   const resolved = await resolveOpenclawExecution({ env });
-  const base = resolved?.env ?? (process.platform === "win32" ? await refreshWindowsPath({ env }) : env);
+  const base =
+    resolved?.env ?? (process.platform === "win32" ? await refreshWindowsPath({ env }) : env);
   const command = resolved?.command ?? "openclaw";
 
   try {
     const versionResult =
       process.platform === "win32"
-        ? await runWindowsShim({ baseCommand: command, args: ["--version"], env: base, collectOutput: true })
+        ? await runWindowsShim({
+            baseCommand: command,
+            args: ["--version"],
+            env: base,
+            collectOutput: true
+          })
         : await runProcess({ command, args: ["--version"], env: base, collectOutput: true });
 
-    const version = parseVersionFromOutput(`${versionResult.stdout}\n${versionResult.stderr}`) ?? "unknown";
+    const version =
+      parseVersionFromOutput(`${versionResult.stdout}\n${versionResult.stderr}`) ?? "unknown";
 
     let trimmedHelp = null;
     if (withHelp) {
       const helpResult =
         process.platform === "win32"
-          ? await runWindowsShim({ baseCommand: command, args: ["--help"], env: base, collectOutput: true })
+          ? await runWindowsShim({
+              baseCommand: command,
+              args: ["--help"],
+              env: base,
+              collectOutput: true
+            })
           : await runProcess({ command, args: ["--help"], env: base, collectOutput: true });
 
       const helpText = `${helpResult.stdout}\n${helpResult.stderr}`.trim();
@@ -1568,7 +1763,13 @@ async function runOpenclawCommand({ signal, args, onLog }) {
   onLog?.(`openclaw ${finalArgs.join(" ")} (${resolved.source})`);
 
   if (process.platform === "win32") {
-    await runWindowsShim({ baseCommand: resolved.command, args: finalArgs, env: baseEnv, signal, onLog });
+    await runWindowsShim({
+      baseCommand: resolved.command,
+      args: finalArgs,
+      env: baseEnv,
+      signal,
+      onLog
+    });
     return { ok: true };
   }
 
@@ -1631,8 +1832,7 @@ function parseGatewayStatusFromText(text) {
     /\bfailed\b/i.test(lower);
 
   const hasLoaded =
-    /\bloaded:\s*loaded\b/i.test(raw) ||
-    (/\(loaded\)/i.test(raw) && !/\(not loaded\)/i.test(raw));
+    /\bloaded:\s*loaded\b/i.test(raw) || (/\(loaded\)/i.test(raw) && !/\(not loaded\)/i.test(raw));
 
   const hasNotInstalled =
     /service not installed/i.test(raw) ||

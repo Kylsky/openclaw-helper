@@ -27,7 +27,7 @@ const progressText = el("progressText");
 
 const gatewayStartBtn = el("gatewayStartBtn");
 const gatewayStopBtn = el("gatewayStopBtn");
-const gatewayStatusBtn = el("gatewayStatusBtn");
+const gatewayRestartBtn = el("gatewayRestartBtn");
 const doctorBtn = el("doctorBtn");
 const updateBtn = el("updateBtn");
 const updateChannel = el("updateChannel");
@@ -105,7 +105,7 @@ function applyGatewayActionAvailability() {
   // "Install service" button is needed).
   gatewayStartBtn.disabled = taskRunning;
   gatewayStopBtn.disabled = taskRunning || isNotInstalled;
-  gatewayStatusBtn.disabled = taskRunning;
+  gatewayRestartBtn.disabled = taskRunning || isNotInstalled;
 
   // "Open Dashboard" only works when the local gateway is running (tokenized URL).
   openDashboardBtn.disabled = taskRunning || !isRunning;
@@ -150,8 +150,14 @@ function appendLog(line) {
   const classify = (text) => {
     const trimmed = text.trim();
     if (trimmed.startsWith("[错误]") || trimmed.startsWith("[前端错误]")) return "logLine logError";
-    if (trimmed.startsWith("[stderr]") || /npm warn/i.test(trimmed) || trimmed.startsWith("[警告]")) return "logLine logWarn";
-    if (trimmed.startsWith("[npm]") || trimmed.startsWith("[brew]") || trimmed.startsWith("[openclaw]") || trimmed.startsWith("[config]")) {
+    if (trimmed.startsWith("[stderr]") || /npm warn/i.test(trimmed) || trimmed.startsWith("[警告]"))
+      return "logLine logWarn";
+    if (
+      trimmed.startsWith("[npm]") ||
+      trimmed.startsWith("[brew]") ||
+      trimmed.startsWith("[openclaw]") ||
+      trimmed.startsWith("[config]")
+    ) {
       return "logLine logCmd";
     }
     if (/^\[ui\]/i.test(trimmed)) return "logLine";
@@ -186,13 +192,13 @@ function setTaskRunning(value) {
 }
 
 function showInstaller() {
-  subtitleEl.textContent = "一键安装";
+  if (subtitleEl) subtitleEl.textContent = "一键安装";
   installerCard.classList.remove("hidden");
   dashboardCard.classList.add("hidden");
 }
 
 function showDashboard(version) {
-  subtitleEl.textContent = "已安装";
+  if (subtitleEl) subtitleEl.textContent = "已安装";
   versionPill.textContent = `version: ${version ?? "-"}`;
   gatewayStatusPill.textContent = "网关：检测中…";
   installerCard.classList.add("hidden");
@@ -230,7 +236,7 @@ async function refreshGatewayStatus() {
 }
 
 async function checkAndRoute() {
-  subtitleEl.textContent = "检测中…";
+  if (subtitleEl) subtitleEl.textContent = "检测中…";
   try {
     const info = await installer.checkOpenclaw();
     if (info?.installed) {
@@ -291,7 +297,7 @@ async function runOpenclawSequence(steps, { stageLabel }) {
       const args = Array.isArray(step.args) ? step.args : [];
       const title = step.stageLabel || stageLabel || "执行中…";
       setStage(title);
-      setProgress(Math.min(0.95, 0.1 + i / Math.max(1, list.length) * 0.8));
+      setProgress(Math.min(0.95, 0.1 + (i / Math.max(1, list.length)) * 0.8));
       await installer.runOpenclaw(args);
     }
     setStage("完成");
@@ -392,7 +398,8 @@ gatewayStartBtn.addEventListener("click", async () => {
     try {
       const status = await installer.getGatewayStatus();
       const raw = String(status?.raw || "");
-      const looksMissing = /scheduled task\s*\(missing\)|gateway service missing|service missing/i.test(raw);
+      const looksMissing =
+        /scheduled task\s*\(missing\)|gateway service missing|service missing/i.test(raw);
       if (status?.state === "not_installed" || looksMissing) {
         steps.push({ args: ["gateway", "install"], stageLabel: "安装网关服务…" });
       }
@@ -409,13 +416,18 @@ gatewayStopBtn.addEventListener("click", async () => {
   await runOpenclaw(["gateway", "stop"], { stageLabel: "停止网关服务…" });
 });
 
-gatewayStatusBtn.addEventListener("click", async () => {
-  await runOpenclaw(["gateway", "status"], { stageLabel: "检查网关状态…" });
+gatewayRestartBtn.addEventListener("click", async () => {
+  await runOpenclawSequence([
+    { args: ["gateway", "stop"], stageLabel: "停止网关服务…" },
+    { args: ["gateway", "start"], stageLabel: "启动网关服务…" }
+  ], { stageLabel: "重启网关服务…" });
   await refreshGatewayStatus();
 });
 
 doctorBtn.addEventListener("click", async () => {
-  await runOpenclaw(["doctor", "--fix", "--yes", "--non-interactive"], { stageLabel: "健康检查/修复…" });
+  await runOpenclaw(["doctor", "--fix", "--yes", "--non-interactive"], {
+    stageLabel: "健康检查/修复…"
+  });
 });
 
 updateBtn.addEventListener("click", async () => {
@@ -492,10 +504,7 @@ installer.onProgress((payload) => {
     if (marker !== lastProgressMarker) {
       lastProgressMarker = marker;
       const stepLine = `==> [${payload.index}/${payload.total}] ${title}`;
-      logEl.insertAdjacentHTML(
-        "beforeend",
-        `<div class="logStep">${escapeMini(stepLine)}</div>`
-      );
+      logEl.insertAdjacentHTML("beforeend", `<div class="logStep">${escapeMini(stepLine)}</div>`);
       logEl.scrollTop = logEl.scrollHeight;
     }
     return;
