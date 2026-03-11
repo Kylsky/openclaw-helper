@@ -1927,6 +1927,15 @@ pub struct WorkspaceMarkdownDocument {
   pub content: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigCenterData {
+  pub agents_defaults: serde_json::Value,
+  pub gateway: serde_json::Value,
+  pub models_providers: serde_json::Value,
+  pub workspace_markdowns: Vec<WorkspaceMarkdownDocument>,
+}
+
 fn default_workspace_dir() -> PathBuf {
   dirs::home_dir()
     .map(|home| home.join(".openclaw").join("workspace"))
@@ -1946,15 +1955,27 @@ fn expand_home_path(value: &str) -> PathBuf {
   PathBuf::from(trimmed)
 }
 
+fn resolve_workspace_dir_from_value(value: Option<&serde_json::Value>) -> PathBuf {
+  if let Some(raw) = value.and_then(|value| value.as_str()) {
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() {
+      return expand_home_path(trimmed);
+    }
+  }
+  default_workspace_dir()
+}
+
+fn resolve_workspace_dir_from_agents_defaults(agents_defaults: &serde_json::Value) -> PathBuf {
+  let workspace_value = agents_defaults
+    .as_object()
+    .and_then(|value| value.get("workspace"));
+  resolve_workspace_dir_from_value(workspace_value)
+}
+
 fn resolve_workspace_dir() -> PathBuf {
   if let Some(resolved) = resolve_openclaw() {
     if let Ok(value) = run_openclaw_config_get_json(&resolved, "agents.defaults.workspace") {
-      if let Some(raw) = value.as_str() {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-          return expand_home_path(trimmed);
-        }
-      }
+      return resolve_workspace_dir_from_value(Some(&value));
     }
   }
   default_workspace_dir()
@@ -2034,6 +2055,39 @@ fn read_workspace_markdown_document(workspace_dir: &Path, name: &str) -> Result<
     exists,
     content,
   })
+}
+
+#[tauri::command]
+pub async fn load_config_center_data() -> Result<ConfigCenterData, String> {
+  let join = tauri::async_runtime::spawn_blocking(move || -> Result<ConfigCenterData, String> {
+    let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
+
+    let agents_defaults = run_openclaw_config_get_json(&resolved, "agents.defaults")
+      .unwrap_or_else(|_| serde_json::json!({}));
+    let gateway = run_openclaw_config_get_json(&resolved, "gateway")
+      .unwrap_or_else(|_| serde_json::json!({}));
+    let models_providers = run_openclaw_config_get_json(&resolved, "models.providers")
+      .unwrap_or_else(|_| serde_json::json!({}));
+
+    let workspace_dir = resolve_workspace_dir_from_agents_defaults(&agents_defaults);
+    let names = collect_workspace_markdown_names(&workspace_dir)?;
+    let workspace_markdowns = names
+      .iter()
+      .map(|name| read_workspace_markdown_document(&workspace_dir, name))
+      .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(ConfigCenterData {
+      agents_defaults,
+      gateway,
+      models_providers,
+      workspace_markdowns,
+    })
+  });
+
+  match join.await {
+    Ok(result) => result,
+    Err(error) => Err(format!("内部错误：配置加载线程异常：{error}")),
+  }
 }
 
 #[tauri::command]

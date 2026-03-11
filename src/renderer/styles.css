@@ -30,6 +30,12 @@
   }
 }
 
+@keyframes buttonSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -201,6 +207,39 @@ button {
   transition: all 0.2s ease;
   font-family: inherit;
   box-shadow: 0 2px 8px rgba(10, 132, 255, 0.3);
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+button.buttonLoading {
+  pointer-events: none;
+  color: transparent !important;
+  text-shadow: none;
+  --button-spinner-color: rgba(255, 255, 255, 0.92);
+}
+
+button.buttonLoading::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid var(--button-spinner-color);
+  border-right-color: transparent;
+  animation: buttonSpin 0.7s linear infinite;
+}
+
+button.secondary.buttonLoading {
+  --button-spinner-color: var(--text);
+}
+
+button.danger.buttonLoading {
+  --button-spinner-color: var(--danger);
 }
 
 button:hover:not(:disabled) {
@@ -549,6 +588,70 @@ button:disabled {
   background: rgba(255, 255, 255, 0.3);
 }
 
+#configCard {
+  position: relative;
+}
+
+.configContent {
+  position: relative;
+  transition: opacity 0.2s ease, filter 0.2s ease;
+}
+
+.configContent.configContentLoading {
+  opacity: 0.22;
+  filter: blur(2px);
+  pointer-events: none;
+  user-select: none;
+}
+
+.configLoadingOverlay {
+  position: absolute;
+  left: 24px;
+  right: 24px;
+  top: 84px;
+  bottom: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 4;
+}
+
+.configLoadingPanel {
+  min-width: min(360px, 100%);
+  max-width: 460px;
+  padding: 28px 24px;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(28, 28, 30, 0.96) 0%, rgba(20, 20, 22, 0.92) 100%);
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.35);
+  text-align: center;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.configLoadingSpinner {
+  width: 26px;
+  height: 26px;
+  margin: 0 auto 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.18);
+  border-top-color: var(--accent);
+  animation: buttonSpin 0.8s linear infinite;
+}
+
+.configLoadingTitle {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.configLoadingHint {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .configScroll {
   overflow-y: auto;
   max-height: 480px;
@@ -726,6 +829,19 @@ input[readonly] {
 
   .operationCloseBtn {
     width: 100%;
+  }
+
+  .configLoadingOverlay {
+    left: 16px;
+    right: 16px;
+    top: 104px;
+    bottom: 16px;
+  }
+
+  .configLoadingPanel {
+    min-width: 0;
+    width: 100%;
+    padding: 24px 18px;
   }
 
   .app {

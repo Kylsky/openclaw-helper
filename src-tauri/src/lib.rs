@@ -27,6 +27,7 @@ pub fn run() {
       commands::start_install,
       commands::cancel_task,
       commands::exec_openclaw_collect,
+      commands::load_config_center_data,
       commands::load_workspace_markdowns,
       commands::save_workspace_markdown
     ])
