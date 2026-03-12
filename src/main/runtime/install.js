@@ -104,6 +104,107 @@ async function taskkillWindowsTreeBestEffort({ pid, env, signal, onLog }) {
   }
 }
 
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function extractWindowsPortFromUrl(url) {
+  const trimmed = String(url ?? "").trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = new URL(trimmed);
+    const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : parsed.protocol === "http:" ? 80 : NaN));
+    if (Number.isInteger(port) && port > 0 && port <= 65535) {
+      return port;
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
+
+async function findWindowsListeningPidsByPort({ port, env, signal }) {
+  if (!port) return [];
+
+  const script = `$ErrorActionPreference='SilentlyContinue'
+$port=${Number(port)}
+$pids=@()
+if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
+  $pids = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
+    Where-Object { $_.State -eq 'Listen' -or $_.State -eq 2 } |
+    Select-Object -ExpandProperty OwningProcess -Unique
+}
+if (-not $pids -or $pids.Count -eq 0) {
+  $lines = netstat -ano -p tcp | Select-String -Pattern (':'+$port+'\s+.*LISTENING\s+(\d+)$')
+  $pids = $lines | ForEach-Object {
+    $m = [regex]::Match($_.Line, '\s+(\d+)\s*$')
+    if ($m.Success) { [int]$m.Groups[1].Value }
+  } | Select-Object -Unique
+}
+$pids | ForEach-Object { [Console]::Out.WriteLine($_) }`;
+
+  try {
+    const result = await runProcess({
+      command: "powershell",
+      args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+      env,
+      signal,
+      collectOutput: true
+    });
+
+    const combined = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    return [...new Set(splitLines(combined).map((line) => Number.parseInt(line.trim(), 10)).filter((pid) => Number.isInteger(pid) && pid > 0))];
+  } catch {
+    return [];
+  }
+}
+
+async function getWindowsGatewayDashboardPortBestEffort({ signal, onLog } = {}) {
+  try {
+    const status = await getGatewayStatus({ signal, onLog });
+    return extractWindowsPortFromUrl(status?.dashboardUrl);
+  } catch {
+    return null;
+  }
+}
+
+async function killWindowsGatewayPortListenersBestEffort({ port, env, signal, onLog, logIfEmpty = false }) {
+  const currentPid = process.pid;
+  let pids = await findWindowsListeningPidsByPort({ port, env, signal });
+  pids = pids.filter((pid) => pid !== currentPid);
+
+  if (pids.length === 0) {
+    if (logIfEmpty) onLog?.(`[gateway] 端口 ${port} 未发现监听进程，停止完成。`);
+    return false;
+  }
+
+  for (const targetPid of pids) {
+    onLog?.(`[gateway] 停止端口 ${port} 对应进程（pid=${targetPid}）…`);
+    await taskkillWindowsTreeBestEffort({ pid: targetPid, env, signal, onLog });
+  }
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    let remaining = await findWindowsListeningPidsByPort({ port, env, signal });
+    remaining = remaining.filter((pid) => pid !== currentPid);
+    if (remaining.length === 0) {
+      onLog?.(`[gateway] 已按端口停止 ${pids.length} 个进程（port=${port}）。`);
+      return true;
+    }
+    await sleep(100);
+  }
+
+  let remaining = await findWindowsListeningPidsByPort({ port, env, signal });
+  remaining = remaining.filter((pid) => pid !== currentPid);
+  if (remaining.length === 0) {
+    onLog?.(`[gateway] 已按端口停止 ${pids.length} 个进程（port=${port}）。`);
+  } else {
+    onLog?.(`[warn] 端口 ${port} 仍有监听进程：${remaining.join(", ")}。`);
+  }
+
+  return true;
+}
+
 function isDisableKeyword(value) {
   const lower = String(value ?? "")
     .trim()
@@ -1748,14 +1849,40 @@ async function runOpenclawCommand({ signal, args, onLog }) {
     }
 
     if (isStop) {
+      const dashboardPort = await getWindowsGatewayDashboardPortBestEffort({ signal, onLog });
+      let stopped = false;
       const pid = windowsDirectGatewayProcess?.pid;
       if (pid) {
         onLog?.(`[gateway] 停止 direct 进程（pid=${pid}）…`);
         await taskkillWindowsTreeBestEffort({ pid, env: baseEnv, signal, onLog });
         windowsDirectGatewayProcess = null;
-        onLog?.("[gateway] direct stopped");
-        return { ok: true };
+        stopped = true;
       }
+
+      windowsDirectGatewayProcess = null;
+
+      if (dashboardPort) {
+        if (!stopped) {
+          onLog?.(`[gateway] 未找到 tracked pid，尝试按端口强制停止（port=${dashboardPort}）…`);
+        }
+        const killedByPort = await killWindowsGatewayPortListenersBestEffort({
+          port: dashboardPort,
+          env: baseEnv,
+          signal,
+          onLog,
+          logIfEmpty: !stopped
+        });
+        stopped = stopped || killedByPort;
+      } else if (!stopped) {
+        onLog?.("[gateway] 未从 gateway status 解析到 Dashboard 端口，跳过端口强杀。");
+      }
+
+      if (stopped) {
+        onLog?.("[gateway] direct stopped");
+      } else {
+        onLog?.("[gateway] 未发现可停止的网关监听进程（已跳过 Scheduled Task 停止）。");
+      }
+      return { ok: true };
     }
   }
 

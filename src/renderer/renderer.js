@@ -92,12 +92,334 @@ function getConfigInputs() {
 let taskRunning = false;
 let cachedGatewayState = "unknown";
 let loadedConfigValues = {};
-let loadedProviderContext = { providerId: "", modelId: "", modelIndex: -1 };
 let loadedProviderCatalog = {};
+let loadedAgentModelBindings = {};
 let loadedWorkspaceMarkdowns = [];
 let workspaceMarkdownEditors = new Map();
 let expandedWorkspaceMarkdownNames = null;
 let configLoadToken = 0;
+
+function normalizeUserFacingTerms(text) {
+  return String(text ?? "")
+    .replace(/openclaw/gi, "OpenClaw")
+    .replace(/Workspace Markdown/g, "工作区说明文档")
+    .replace(/workspace Markdown/g, "工作区说明文档")
+    .replace(/Dashboard/g, "控制台")
+    .replace(/openai-responses/g, "OpenAI 接口");
+}
+
+function formatPlatformName(value) {
+  const key = String(value ?? "").trim().toLowerCase();
+  if (key === "windows" || key === "win32") return "Windows";
+  if (key === "darwin" || key === "macos") return "macOS";
+  if (key === "linux") return "Linux";
+  return value;
+}
+
+function humanizeStageText(text) {
+  const raw = normalizeUserFacingTerms(text).trim();
+  if (!raw) return "";
+
+  const exactMap = {
+    "执行中…": "正在处理…",
+    "打开 控制台…": "正在打开控制台…",
+    "健康检查/修复…": "正在检查并尽量自动修复问题…",
+    "保存 工作区说明文档…": "正在保存工作区说明文档…",
+    "全局安装 OpenClaw…": "正在安装 OpenClaw…",
+    "验证 OpenClaw 命令…": "正在确认 OpenClaw 是否可用…",
+    "自动配置 OpenClaw…": "正在自动完成 OpenClaw 配置…",
+    "写入 OpenAI 接口 配置…": "正在写入 OpenAI 接口配置…",
+    "取消当前任务…": "正在取消当前操作…",
+    "检测 OpenClaw 命令是否仍存在…": "正在确认 OpenClaw 是否已卸载…"
+  };
+
+  if (exactMap[raw]) return exactMap[raw];
+
+  return raw;
+}
+
+function humanizeErrorMessage(message) {
+  const raw = normalizeUserFacingTerms(message).trim();
+  if (!raw) return "发生了未知问题，请稍后重试。";
+
+  let match = raw.match(/^取消失败：(.+)$/);
+  if (match) return `取消没有成功：${humanizeErrorMessage(match[1])}`;
+
+  match = raw.match(/^读取 工作区说明文档 失败：(.+)$/);
+  if (match) return `读取工作区说明文档时出错：${humanizeErrorMessage(match[1])}`;
+
+  match = raw.match(/^读取配置中心失败：(.+)$/);
+  if (match) return `读取当前配置时出错：${humanizeErrorMessage(match[1])}`;
+
+  match = raw.match(/^读取 (.+) 失败：(.+)$/);
+  if (match) return `读取“${match[1]}”时出错：${humanizeErrorMessage(match[2])}`;
+
+  match = raw.match(/^写入 (.+) 失败：(.+)$/);
+  if (match) return `保存“${match[1]}”时出错：${humanizeErrorMessage(match[2])}`;
+
+  match = raw.match(/^创建 workspace 目录失败：(.+)$/);
+  if (match) return `创建工作区目录时出错：${humanizeErrorMessage(match[1])}`;
+
+  match = raw.match(/^内部错误：(?:任务线程异常|配置加载线程异常)：(.+)$/);
+  if (match) return "程序内部任务被中断了，请重试一次；如果仍然失败，可以把日志发给开发者排查。";
+
+  match = raw.match(/^OpenClaw onboard 失败（退出码 (\d+)）$/);
+  if (match) return `自动配置没有完成（错误码 ${match[1]}）。`;
+
+  match = raw.match(/^gateway install 失败（退出码 (\d+)）$/);
+  if (match) return `网关服务安装没有完成（错误码 ${match[1]}）。`;
+
+  match = raw.match(/^winget 安装 Git 失败（退出码 (\d+)）$/);
+  if (match) return `Git 自动安装没有完成（错误码 ${match[1]}）。`;
+
+  match = raw.match(/^winget 安装 Node\.js 失败（退出码 (\d+)）$/);
+  if (match) return `Node.js 自动安装没有完成（错误码 ${match[1]}）。`;
+
+  match = raw.match(/^OpenClaw 退出码：(\d+)$/);
+  if (match) return `操作没有成功完成（错误码 ${match[1]}）。`;
+
+  match = raw.match(/^Node\.js 版本过低：(.+)（需要 >= (\d+)）$/);
+  if (match) return `当前 Node.js 版本是 ${match[1]}，需要升级到 ${match[2]} 或更高版本。`;
+
+  match = raw.match(/^OpenClaw 安装完成，但无法执行 OpenClaw：(.+)$/);
+  if (match) return "安装看起来已经完成，但系统暂时还没有正确识别 OpenClaw 命令。可以稍后重试，或重新打开应用后再试。";
+
+  if (raw === "已有任务正在运行，请先取消或等待完成。") {
+    return "当前已经有一个任务在进行中，请等待它完成，或先点击“取消当前任务”。";
+  }
+  if (raw === "未检测到 OpenClaw，请先完成安装。") {
+    return "还没有检测到 OpenClaw，请先完成安装。";
+  }
+  if (raw === "未获取到控制台链接，请先启动网关或完成配置。") {
+    return "暂时还打不开控制台，请先启动网关，或先完成必要配置。";
+  }
+  if (raw === "缺少 OpenClaw 参数") {
+    return "缺少必要参数，请稍后重试。";
+  }
+  if (raw === "只允许打开 http/https 链接") {
+    return "只能打开以 http:// 或 https:// 开头的链接。";
+  }
+  if (raw === "当前平台暂不支持自动打开配置向导终端窗口。") {
+    return "当前系统暂不支持自动打开配置窗口，请手动运行配置向导。";
+  }
+  if (raw === "用户取消") {
+    return "你已取消当前操作。";
+  }
+  if (raw === "npm install -g 失败，请查看日志。") {
+    return "安装没有完成，请展开详细过程查看原因。";
+  }
+  if (raw === "未检测到 npm。请确认 Node.js 安装完整，或重新安装 Node.js 后重试。") {
+    return "没有检测到 npm，请确认 Node.js 已完整安装。";
+  }
+  if (raw === "无法解析 node 版本") {
+    return "暂时无法识别当前 Node.js 版本，请稍后重试。";
+  }
+
+  return raw;
+}
+
+function humanizeLogLine(line) {
+  const raw = String(line ?? "").trim();
+  if (!raw) return "";
+
+  let match = raw.match(/^\[错误\]\s*(.+)$/);
+  if (match) return `出错了：${humanizeErrorMessage(match[1])}`;
+
+  match = raw.match(/^\[前端错误\]\s*(.+)$/);
+  if (match) return `界面发生异常：${humanizeErrorMessage(match[1])}`;
+
+  match = raw.match(/^\[Promise 错误\]\s*(.+)$/);
+  if (match) return `界面有一个操作没有正常完成：${humanizeErrorMessage(match[1])}`;
+
+  if (raw === "== 环境诊断 ==") return "正在检查当前电脑的安装环境…";
+  if (raw === "== 诊断结束 ==") return "环境检查完成。";
+  if (raw === "openclaw resolved: (not found)") return "当前还没有检测到 OpenClaw。";
+  if (/^openclaw resolved: \(found\) \(.+\)$/.test(raw)) return "已检测到 OpenClaw，可继续下一步。";
+  if (raw === "[config] 设置 api=openai-responses…") return "正在写入 OpenAI 接口配置…";
+  if (raw === "[config] ok") return "配置写入完成。";
+  if (raw === "[ui] 请求取消任务…") return "正在请求取消当前操作…";
+  if (raw === "[ui] 没有检测到新的配置或 Markdown 变更。") return "没有发现需要保存的改动。";
+  if (raw === "[ui] 配置已成功写入。网关可能需要重启以应用新规则。") {
+    return "配置已保存。部分改动可能需要重启网关后才会生效。";
+  }
+  if (raw === "[ui] 配置和 Workspace Markdown 已成功写入。网关可能需要重启以应用新规则。") {
+    return "配置和工作区说明文档已保存。部分改动可能需要重启网关后才会生效。";
+  }
+  if (raw === "[ui] Workspace Markdown 已成功保存。新会话或后续上下文加载时会生效。") {
+    return "工作区说明文档已保存，新会话会自动使用这些内容。";
+  }
+  if (raw === "[ui] 点击卸载") return "已选择卸载 OpenClaw。";
+  if (raw === "[ui] 用户取消卸载") return "已取消卸载。";
+  if (raw === "[ui] 开始卸载…") return "正在卸载 OpenClaw…";
+  if (raw === "openclaw 命令已移除，已切换到安装界面。") {
+    return "已确认 OpenClaw 命令已移除，页面已切换回安装界面。";
+  }
+  if (raw === "跳过自动配置：未提供 CUSTOM_API_KEY。") {
+    return "已跳过自动配置，因为你还没有填写 API Key。";
+  }
+  if (raw === "安装完成：未自动重启网关服务，你可以稍后手动启动。") {
+    return "安装完成。网关暂未自动启动，你可以稍后手动启动。";
+  }
+  if (raw === "[tip] 若状态未及时刷新，请等待几秒后点击“检查网关状态”。") {
+    return "如果状态没有马上更新，等几秒后再点一次“检查网关状态”即可。";
+  }
+  if (raw === "[tip] 安装网关服务需要管理员权限，将弹出 UAC 授权窗口，并打开管理员终端窗口执行安装（这是 Windows 限制）。") {
+    return "安装网关服务需要管理员授权，稍后会弹出系统确认窗口。";
+  }
+  if (raw === "[gateway] install: ok") return "网关服务安装完成。";
+  if (raw === "[gateway] 未发现可停止的网关监听进程（已跳过 Scheduled Task 停止）。") {
+    return "没有发现仍在运行的网关进程，无需继续停止。";
+  }
+  if (raw === "[gateway] 已在运行（direct）") return "网关已经在运行，无需重复启动。";
+
+  match = raw.match(/^平台：(.+?) \/ (.+)$/);
+  if (match) return `当前系统：${formatPlatformName(match[1])} ${String(match[2]).toUpperCase()}`;
+
+  match = raw.match(/^openclaw 包名：(.+)$/);
+  if (match) return `准备安装：${normalizeUserFacingTerms(match[1])}`;
+
+  match = raw.match(/^npm registry: (.+)$/);
+  if (match) return `下载源：${match[1]}`;
+
+  match = raw.match(/^GitHub mirror: \(none\)$/);
+  if (match) return "GitHub 下载加速：未开启。";
+
+  match = raw.match(/^GitHub mirror: (.+)$/);
+  if (match) return `GitHub 下载加速：${match[1]}`;
+
+  match = raw.match(/^\[config\] provider: (.+)$/);
+  if (match) return `正在应用服务商配置：${normalizeUserFacingTerms(match[1])}`;
+
+  match = raw.match(/^\[config\] model: (.+)$/);
+  if (match) return `正在应用模型配置：${normalizeUserFacingTerms(match[1])}`;
+
+  match = raw.match(/^OpenClaw --version => (.+)$/);
+  if (match) return `OpenClaw 已安装，当前版本：${match[1]}`;
+
+  match = raw.match(/^openclaw --version: (.+)$/i);
+  if (match) return `OpenClaw 已安装，当前版本：${match[1]}`;
+
+  match = raw.match(/^未检测到 Git，尝试通过 winget 安装 Git…$/);
+  if (match) return "没有检测到 Git，正在尝试自动补装…";
+
+  match = raw.match(/^Node\.js \/ npm 不满足要求，尝试通过 winget 修复…$/);
+  if (match) return "Node.js 环境还没有准备好，正在尝试自动修复…";
+
+  match = raw.match(/^已启用 GitHub 镜像：(.+)（用于加速\/绕过 GitHub 访问问题；仅本次安装生效）$/);
+  if (match) return `已开启下载加速，本次安装会优先使用：${match[1]}`;
+
+  match = raw.match(/^\[warn\] 检测到 GitHub 连接失败，尝试启用 GitHub 镜像：(.+)（仅本次安装生效）$/);
+  if (match) return `连接 GitHub 不稳定，正在自动切换到备用下载源：${match[1]}`;
+
+  match = raw.match(/^\[npm\] NODE_LLAMA_CPP_SKIP_DOWNLOAD=1（跳过 node-llama-cpp 安装期下载\/编译，提升 Windows 安装成功率）$/);
+  if (match) return "已开启更稳妥的安装模式，尽量减少下载和编译失败。";
+
+  match = raw.match(/^\[openclaw\] onboard 失败，尝试输出 gateway status 以便排查…$/);
+  if (match) return "自动配置没有成功，正在补充收集诊断信息…";
+
+  match = raw.match(/^\[gateway\] 已在运行（direct, pid=\d+）$/);
+  if (match) return "网关已经在运行，无需重复启动。";
+
+  match = raw.match(/^\[windows\] 使用 direct 模式启动网关（不依赖 Scheduled Task \/ 无需管理员）$/);
+  if (match) return "正在用免管理员模式启动网关…";
+
+  match = raw.match(/^\[gateway\] direct started \(pid=\d+\)$/);
+  if (match) return "网关已启动。";
+
+  match = raw.match(/^\[warn\] 记录 direct gateway 进程失败：(.+)$/);
+  if (match) return `网关已经启动，但记录运行信息时遇到一点小问题：${humanizeErrorMessage(match[1])}`;
+
+  match = raw.match(/^\[gateway\] 停止 direct 进程（pid=\d+）…$/);
+  if (match) return "正在停止网关…";
+
+  match = raw.match(/^\[gateway\] direct stopped$/);
+  if (match) return "网关已停止。";
+
+  match = raw.match(/^\[gateway\] 未从 gateway status 解析到 Dashboard 端口，跳过端口强杀。$/);
+  if (match) return "没有识别到控制台端口，先跳过额外清理步骤。";
+
+  match = raw.match(/^\[gateway\] Dashboard 地址无法解析端口：(.+)$/);
+  if (match) return `暂时无法识别控制台地址中的端口：${match[1]}`;
+
+  match = raw.match(/^\[gateway\] 未找到 tracked pid，尝试按端口强制停止（port=(\d+)）…$/);
+  if (match) return `没有找到上一次启动记录，正在按端口 ${match[1]} 尝试停止网关…`;
+
+  match = raw.match(/^\[gateway\] 端口 (\d+) 未发现监听进程，停止完成。$/);
+  if (match) return `没有发现仍在占用端口 ${match[1]} 的网关进程，已处理完成。`;
+
+  match = raw.match(/^\[gateway\] 停止端口 (\d+) 对应进程（pid=\d+）…$/);
+  if (match) return `正在清理仍占用端口 ${match[1]} 的进程…`;
+
+  match = raw.match(/^\[gateway\] 已按端口停止 (\d+) 个进程（port=(\d+)）。$/);
+  if (match) return `已清理占用端口 ${match[2]} 的 ${match[1]} 个进程。`;
+
+  match = raw.match(/^\[markdown\] 保存 (.+)\.\.\.$/);
+  if (match) return `正在保存工作区说明文档：${match[1]}`;
+
+  match = raw.match(/^OpenClaw (.+) \((.+)\)$/i);
+  if (match) {
+    const commandText = match[1];
+    if (/^gateway install\b/i.test(commandText)) return "正在安装网关服务…";
+    if (/^gateway start\b/i.test(commandText)) return "正在启动网关…";
+    if (/^gateway stop\b/i.test(commandText)) return "正在停止网关…";
+    if (/^gateway restart\b/i.test(commandText)) return "正在重启网关…";
+    if (/^dashboard\b/i.test(commandText)) return "正在获取控制台地址…";
+    if (/^doctor\b/i.test(commandText)) return "正在检查并尽量自动修复问题…";
+    if (/^update\b/i.test(commandText)) return "正在更新 OpenClaw…";
+  }
+
+  const genericPrefixes = [
+    { regex: /^\[ui\]\s*/i, label: "" },
+    { regex: /^\[tip\]\s*/i, label: "提示：" },
+    { regex: /^\[warn\]\s*/i, label: "提醒：" },
+    { regex: /^\[stderr\]\s*/i, label: "详细信息：" },
+    { regex: /^\[gateway\]\s*/i, label: "网关：" },
+    { regex: /^\[config\]\s*/i, label: "配置：" },
+    { regex: /^\[markdown\]\s*/i, label: "工作区说明文档：" },
+    { regex: /^\[openclaw\]\s*/i, label: "OpenClaw：" },
+    { regex: /^\[npm\]\s*/i, label: "安装输出：" },
+    { regex: /^\[winget\]\s*/i, label: "系统安装器：" },
+    { regex: /^\[brew\]\s*/i, label: "Homebrew：" },
+    { regex: /^\[boot\]\s*/i, label: "启动检查：" }
+  ];
+
+  for (const { regex, label } of genericPrefixes) {
+    if (!regex.test(raw)) continue;
+    const detail = normalizeUserFacingTerms(raw.replace(regex, "").trim());
+    return label ? `${label}${detail}` : detail;
+  }
+
+  return normalizeUserFacingTerms(raw);
+}
+
+function classifyLogLine(rawText, displayText) {
+  const raw = String(rawText ?? "").trim();
+  const display = String(displayText ?? "").trim();
+
+  if (
+    /^\[(错误|前端错误|Promise 错误)\]/.test(raw) ||
+    /^(出错了：|界面发生异常：|界面有一个操作没有正常完成：)/.test(display)
+  ) {
+    return "logLine logError";
+  }
+
+  if (
+    /^\[(stderr|warn|警告|tip)\]/i.test(raw) ||
+    /npm warn/i.test(raw) ||
+    /^(提醒：|提示：|详细信息：)/.test(display)
+  ) {
+    return "logLine logWarn";
+  }
+
+  if (
+    /^\[(npm|brew|openclaw|config|markdown|winget|gateway|boot)\]/i.test(raw) ||
+    /^OpenClaw\b/i.test(normalizeUserFacingTerms(raw))
+  ) {
+    return "logLine logCmd";
+  }
+
+  return "logLine";
+}
 
 function confirmModal({ title, body, confirmText = "确定", cancelText = "取消" }) {
   return new Promise((resolve) => {
@@ -166,7 +488,7 @@ function updateOperationModalAvailability() {
 
 function showOperationModal(title = "执行详情") {
   if (!operationOverlay || !operationTitle) return;
-  operationTitle.textContent = String(title ?? "执行详情");
+  operationTitle.textContent = humanizeStageText(title ?? "执行详情");
   operationOverlay.classList.remove("hidden");
   updateOperationModalAvailability();
   updateLogVisibility();
@@ -271,7 +593,7 @@ async function rerouteIfOpenclawMissing(error) {
 }
 
 function setStage(text) {
-  stageText.textContent = text;
+  stageText.textContent = humanizeStageText(text);
 }
 
 function setProgress(percent) {
@@ -282,6 +604,7 @@ function setProgress(percent) {
 
 function appendLog(line) {
   const raw = String(line ?? "");
+  const display = humanizeLogLine(raw);
 
   const escapeHtml = (value) =>
     String(value)
@@ -291,26 +614,8 @@ function appendLog(line) {
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
 
-  const classify = (text) => {
-    const trimmed = text.trim();
-    if (trimmed.startsWith("[错误]") || trimmed.startsWith("[前端错误]")) return "logLine logError";
-    if (trimmed.startsWith("[stderr]") || /npm warn/i.test(trimmed) || trimmed.startsWith("[警告]"))
-      return "logLine logWarn";
-    if (
-      trimmed.startsWith("[npm]") ||
-      trimmed.startsWith("[brew]") ||
-      trimmed.startsWith("[openclaw]") ||
-      trimmed.startsWith("[config]") ||
-      trimmed.startsWith("[markdown]")
-    ) {
-      return "logLine logCmd";
-    }
-    if (/^\[ui\]/i.test(trimmed)) return "logLine";
-    return "logLine";
-  };
-
-  const klass = classify(raw);
-  const html = `<div class="${klass}">${escapeHtml(raw)}</div>`;
+  const klass = classifyLogLine(raw, display);
+  const html = `<div class="${klass}">${escapeHtml(display)}</div>`;
   logEl.insertAdjacentHTML("beforeend", html);
   logEl.scrollTop = logEl.scrollHeight;
 }
@@ -585,6 +890,14 @@ function formatStringList(value) {
   return normalizeStringList(value).join("\n");
 }
 
+function cloneJsonValue(value, fallback = {}) {
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return fallback;
+  }
+}
+
 function parseStringListInput(value) {
   return Array.from(new Set(
     String(value ?? "")
@@ -615,12 +928,34 @@ function parseModelRef(modelRef) {
   };
 }
 
+function escapeRegExp(value) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function deriveModelDisplayName(previousName, previousModelId, nextModelId) {
+  const nextId = String(nextModelId ?? "").trim();
+  const prevId = String(previousModelId ?? "").trim();
+  const prevName = String(previousName ?? "").trim();
+
+  if (!nextId) return "";
+  if (!prevName) return nextId;
+  if (!prevId) return nextId;
+
+  const pattern = new RegExp(escapeRegExp(prevId), "ig");
+  if (pattern.test(prevName)) {
+    return prevName.replace(new RegExp(escapeRegExp(prevId), "ig"), nextId);
+  }
+
+  return nextId;
+}
+
 function resolveProviderContext(modelRef, providers = loadedProviderCatalog) {
   const { providerId, modelId } = parseModelRef(modelRef);
   const context = {
     providerId,
     modelId,
     modelIndex: -1,
+    modelName: "",
     providerApi: "",
     baseUrl: "",
     hasApiKey: false,
@@ -643,6 +978,9 @@ function resolveProviderContext(modelRef, providers = loadedProviderCatalog) {
   if (modelIndex >= 0) {
     context.modelIndex = modelIndex;
     const model = getObjectValue(models[modelIndex]);
+    if (typeof model.name === "string") {
+      context.modelName = model.name;
+    }
     if (model.contextWindow !== undefined && model.contextWindow !== null) {
       context.contextWindow = String(model.contextWindow);
     }
@@ -654,9 +992,69 @@ function resolveProviderContext(modelRef, providers = loadedProviderCatalog) {
   return context;
 }
 
+function resolveEditableProviderContext(modelRef, previousModelRef = loadedConfigValues.defaultModel, providers = loadedProviderCatalog) {
+  const targetContext = resolveProviderContext(modelRef, providers);
+  const previousContext = resolveProviderContext(previousModelRef, providers);
+  const shouldReusePreviousModelContext =
+    targetContext.providerId &&
+    targetContext.modelIndex < 0 &&
+    targetContext.providerId === previousContext.providerId &&
+    previousContext.modelIndex >= 0;
+
+  return {
+    targetContext,
+    previousContext,
+    effectiveContext: shouldReusePreviousModelContext
+      ? {
+        ...previousContext,
+        modelId: targetContext.modelId
+      }
+      : targetContext
+  };
+}
+
+function syncDefaultModelBindings(bindings, previousModelRef, nextModelRef) {
+  const currentBindings = getObjectValue(bindings);
+  const prevRef = String(previousModelRef ?? "").trim();
+  const nextRef = String(nextModelRef ?? "").trim();
+
+  if (!nextRef || nextRef === prevRef) return currentBindings;
+
+  const nextBindings = cloneJsonValue(currentBindings);
+  if (Object.prototype.hasOwnProperty.call(nextBindings, nextRef)) {
+    return nextBindings;
+  }
+
+  const seedValue =
+    prevRef && Object.prototype.hasOwnProperty.call(nextBindings, prevRef) ? nextBindings[prevRef] : {};
+  nextBindings[nextRef] = cloneJsonValue(seedValue);
+  return nextBindings;
+}
+
 function updateProviderPreview() {
-  const { providerId } = parseModelRef(getInputValue(cfgDefaultModel));
-  setInputValue(cfgProviderId, providerId || loadedProviderContext.providerId || "");
+  const modelRef = getInputValue(cfgDefaultModel);
+  const { providerId } = parseModelRef(modelRef);
+  const { effectiveContext } = resolveEditableProviderContext(modelRef);
+  const providerCatalog = getObjectValue(loadedProviderCatalog);
+  const provider = getObjectValue(providerCatalog[providerId]);
+  const hasKnownProvider = Boolean(providerId && Object.keys(provider).length);
+
+  setInputValue(cfgProviderId, providerId || "");
+
+  if (!hasKnownProvider) {
+    return;
+  }
+
+  setInputValue(cfgProviderApi, effectiveContext.providerApi);
+  setInputValue(cfgBaseUrl, effectiveContext.baseUrl);
+  setInputValue(cfgContextWindow, effectiveContext.contextWindow);
+  setInputValue(cfgMaxTokens, effectiveContext.maxTokens);
+  setSecretPlaceholder(
+    cfgApiKey,
+    "已配置 API Key；留空表示保持原值，输入则覆盖。",
+    "未配置 API Key；输入后保存。",
+    effectiveContext.hasApiKey
+  );
 }
 
 function buildModelPresetValues(providers) {
@@ -788,6 +1186,18 @@ function queueIntegerConfigSet(seq, { label, path, rawValue, currentValue = "", 
   });
 }
 
+function queueJsonConfigSet(seq, { label, path, value, currentValue, stageLabel }) {
+  const nextJson = JSON.stringify(value ?? null);
+  const prevJson = JSON.stringify(currentValue ?? null);
+  if (nextJson === prevJson) return;
+
+  seq.push({
+    args: ["config", "set", "--strict-json", path, nextJson],
+    stageLabel,
+    logLine: `[config] 更新${label}...`
+  });
+}
+
 function queueStringArrayConfigSet(seq, { label, path, rawValue, currentValue = [], stageLabel }) {
   const nextValue = parseStringListInput(rawValue);
   const prevValue = normalizeStringList(currentValue);
@@ -891,7 +1301,7 @@ async function loadConfigValues() {
     const nextProviderContext = resolveProviderContext(defaultModel, modelsProviders);
 
     loadedProviderCatalog = modelsProviders;
-    loadedProviderContext = nextProviderContext;
+    loadedAgentModelBindings = getObjectValue(getNestedValue(agentsDefaults, ["models"], {}));
 
     const workspace = getNestedValue(agentsDefaults, ["workspace"]);
     const maxConcurrent = getNestedValue(agentsDefaults, ["maxConcurrent"]);
@@ -1278,21 +1688,19 @@ if (configSaveBtn) {
         const newGatewayTrustedProxyAllowUsers = getInputValue(cfgGatewayTrustedProxyAllowUsers);
 
         const targetModelRef = newModel || loadedConfigValues.defaultModel || "";
-        const { providerId: targetProviderId } = parseModelRef(targetModelRef);
+        const { targetContext: targetProviderContext, previousContext: previousProviderContext, effectiveContext: editableProviderContext } =
+          resolveEditableProviderContext(targetModelRef);
+        const targetProviderId = targetProviderContext.providerId;
         const providerFieldsChanged =
-          (newProviderApi && newProviderApi !== loadedConfigValues.providerApi) ||
-          (newBaseUrl && newBaseUrl !== loadedConfigValues.baseUrl) ||
+          (newProviderApi && newProviderApi !== editableProviderContext.providerApi) ||
+          (newBaseUrl && newBaseUrl !== editableProviderContext.baseUrl) ||
           Boolean(newApiKey) ||
-          (newContextWindow && newContextWindow !== loadedConfigValues.contextWindow) ||
-          (newMaxTokens && newMaxTokens !== loadedConfigValues.maxTokens);
+          (newContextWindow && newContextWindow !== editableProviderContext.contextWindow) ||
+          (newMaxTokens && newMaxTokens !== editableProviderContext.maxTokens);
 
         if (!targetProviderId && providerFieldsChanged) {
           throw new Error("默认模型需要是 `provider/model` 格式，才能保存 Provider 相关配置。");
         }
-
-        const targetProviderContext = targetProviderId
-          ? resolveProviderContext(targetModelRef)
-          : { providerId: "", modelId: "", modelIndex: -1 };
 
         const seq = [];
         const deferredNotices = [];
@@ -1318,6 +1726,14 @@ if (configSaveBtn) {
           }
         }
 
+        queueJsonConfigSet(seq, {
+          label: "默认模型关联映射",
+          path: "agents.defaults.models",
+          value: syncDefaultModelBindings(loadedAgentModelBindings, loadedConfigValues.defaultModel, targetModelRef),
+          currentValue: loadedAgentModelBindings,
+          stageLabel: "同步默认模型关联映射…"
+        });
+
         queueTextConfigSet(seq, {
           label: "默认模型",
           path: "agents.defaults.model.primary",
@@ -1328,18 +1744,25 @@ if (configSaveBtn) {
 
         if (targetProviderId) {
           const providerBasePath = `models.providers.${targetProviderId}`;
+          const shouldSyncProviderModelId =
+            targetProviderContext.modelIndex < 0 &&
+            targetProviderContext.modelId &&
+            previousProviderContext.providerId === targetProviderId &&
+            previousProviderContext.modelIndex >= 0 &&
+            previousProviderContext.modelId !== targetProviderContext.modelId;
+
           queueTextConfigSet(seq, {
             label: "Provider API 模式",
             path: `${providerBasePath}.api`,
             value: newProviderApi,
-            currentValue: loadedConfigValues.providerApi,
+            currentValue: editableProviderContext.providerApi,
             stageLabel: "更新 Provider API 模式…"
           });
           queueTextConfigSet(seq, {
             label: "Base URL",
             path: `${providerBasePath}.baseUrl`,
             value: newBaseUrl,
-            currentValue: loadedConfigValues.baseUrl,
+            currentValue: editableProviderContext.baseUrl,
             stageLabel: "更新 Base URL…"
           });
           queueTextConfigSet(seq, {
@@ -1352,23 +1775,46 @@ if (configSaveBtn) {
           });
 
           const hasModelTuningChange =
-            (newContextWindow && newContextWindow !== loadedConfigValues.contextWindow) ||
-            (newMaxTokens && newMaxTokens !== loadedConfigValues.maxTokens);
+            (newContextWindow && newContextWindow !== editableProviderContext.contextWindow) ||
+            (newMaxTokens && newMaxTokens !== editableProviderContext.maxTokens);
 
-          if (targetProviderContext.modelIndex >= 0) {
-            const modelBasePath = `${providerBasePath}.models[${targetProviderContext.modelIndex}]`;
+          if (shouldSyncProviderModelId) {
+            const nextModelName = deriveModelDisplayName(
+              previousProviderContext.modelName,
+              previousProviderContext.modelId,
+              targetProviderContext.modelId
+            );
+
+            queueTextConfigSet(seq, {
+              label: "Provider 模型 ID",
+              path: `${providerBasePath}.models[${editableProviderContext.modelIndex}].id`,
+              value: targetProviderContext.modelId,
+              currentValue: previousProviderContext.modelId,
+              stageLabel: "同步 Provider 模型 ID…"
+            });
+            queueTextConfigSet(seq, {
+              label: "Provider 模型名称",
+              path: `${providerBasePath}.models[${editableProviderContext.modelIndex}].name`,
+              value: nextModelName,
+              currentValue: previousProviderContext.modelName,
+              stageLabel: "同步 Provider 模型名称…"
+            });
+          }
+
+          if (editableProviderContext.modelIndex >= 0) {
+            const modelBasePath = `${providerBasePath}.models[${editableProviderContext.modelIndex}]`;
             queueIntegerConfigSet(seq, {
               label: "Context Window",
               path: `${modelBasePath}.contextWindow`,
               rawValue: newContextWindow,
-              currentValue: loadedConfigValues.contextWindow,
+              currentValue: editableProviderContext.contextWindow,
               stageLabel: "更新 Context Window…"
             });
             queueIntegerConfigSet(seq, {
               label: "Max Tokens",
               path: `${modelBasePath}.maxTokens`,
               rawValue: newMaxTokens,
-              currentValue: loadedConfigValues.maxTokens,
+              currentValue: editableProviderContext.maxTokens,
               stageLabel: "更新 Max Tokens…"
             });
           } else if (hasModelTuningChange) {
@@ -1679,7 +2125,7 @@ installer.onProgress((payload) => {
   if (payload?.index && payload?.total) {
     setStage(`安装中…（${payload.index}/${payload.total}）`);
 
-    const title = payload?.title ? String(payload.title) : "进行中…";
+    const title = payload?.title ? humanizeStageText(payload.title) : "进行中…";
     const marker = `${payload.index}/${payload.total}:${payload.stage || ""}:${title}`;
     if (marker !== lastProgressMarker) {
       lastProgressMarker = marker;

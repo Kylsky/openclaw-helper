@@ -1311,6 +1311,69 @@ fn run_openclaw_config_get_json(
   serde_json::from_str(&stdout).map_err(|e| format!("解析配置 {path} 失败：{e}"))
 }
 
+fn read_json_file(path: &Path) -> Result<serde_json::Value, String> {
+  let raw = std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败：{e}", path.to_string_lossy()))?;
+  serde_json::from_str(&raw).map_err(|e| format!("解析 {} 失败：{e}", path.to_string_lossy()))
+}
+
+fn resolve_openclaw_config_file_path(
+  resolved: &crate::openclaw::ResolvedOpenclaw,
+) -> Result<PathBuf, String> {
+  let mut cmd = Command::new(&resolved.command);
+  apply_windows_no_window(&mut cmd);
+  cmd.env("PATH", &resolved.path_env);
+  cmd.args(["config", "file"]);
+  let out = cmd.output().map_err(|e| e.to_string())?;
+  if !out.status.success() {
+    return Err(format!("读取配置文件路径失败：{}", openclaw_command_error(&out)));
+  }
+
+  let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+  if stdout.is_empty() {
+    return Err("读取配置文件路径失败：openclaw 未返回路径。".into());
+  }
+
+  Ok(expand_home_path(&stdout))
+}
+
+fn default_openclaw_config_file_path() -> PathBuf {
+  crate::openclaw::home_dir()
+    .map(|home| home.join(".openclaw").join("openclaw.json"))
+    .unwrap_or_else(|| PathBuf::from(".openclaw").join("openclaw.json"))
+}
+
+fn load_openclaw_config_root(
+  resolved: &crate::openclaw::ResolvedOpenclaw,
+) -> Result<serde_json::Value, String> {
+  let default_path = default_openclaw_config_file_path();
+  let mut first_error: Option<String> = None;
+
+  if default_path.is_file() {
+    match read_json_file(&default_path) {
+      Ok(root) => return Ok(root),
+      Err(error) => first_error = Some(error),
+    }
+  }
+
+  let config_path = resolve_openclaw_config_file_path(resolved).map_err(|error| first_error.clone().unwrap_or(error))?;
+  if config_path == default_path {
+    return Err(first_error.unwrap_or_else(|| format!("读取 {} 失败。", config_path.to_string_lossy())));
+  }
+
+  read_json_file(&config_path).map_err(|error| match first_error {
+    Some(first) => format!("{first}；{error}"),
+    None => error,
+  })
+}
+
+fn get_json_value_at_path(root: &serde_json::Value, path: &[&str]) -> Option<serde_json::Value> {
+  let mut current = root;
+  for segment in path {
+    current = current.as_object()?.get(*segment)?;
+  }
+  Some(current.clone())
+}
+
 fn run_openclaw_config_set(
   window: &Window,
   cancel: &Arc<AtomicBool>,
@@ -1945,10 +2008,10 @@ fn default_workspace_dir() -> PathBuf {
 fn expand_home_path(value: &str) -> PathBuf {
   let trimmed = value.trim();
   if trimmed == "~" {
-    return dirs::home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
+    return crate::openclaw::home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
   }
-  if let Some(rest) = trimmed.strip_prefix("~/") {
-    return dirs::home_dir()
+  if let Some(rest) = trimmed.strip_prefix("~/").or_else(|| trimmed.strip_prefix("~\\")) {
+    return crate::openclaw::home_dir()
       .map(|home| home.join(rest))
       .unwrap_or_else(|| PathBuf::from(trimmed));
   }
@@ -2061,13 +2124,23 @@ fn read_workspace_markdown_document(workspace_dir: &Path, name: &str) -> Result<
 pub async fn load_config_center_data() -> Result<ConfigCenterData, String> {
   let join = tauri::async_runtime::spawn_blocking(move || -> Result<ConfigCenterData, String> {
     let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
+    let config_root = load_openclaw_config_root(&resolved).ok();
 
-    let agents_defaults = run_openclaw_config_get_json(&resolved, "agents.defaults")
-      .unwrap_or_else(|_| serde_json::json!({}));
-    let gateway = run_openclaw_config_get_json(&resolved, "gateway")
-      .unwrap_or_else(|_| serde_json::json!({}));
-    let models_providers = run_openclaw_config_get_json(&resolved, "models.providers")
-      .unwrap_or_else(|_| serde_json::json!({}));
+    let agents_defaults = config_root
+      .as_ref()
+      .and_then(|root| get_json_value_at_path(root, &["agents", "defaults"]))
+      .or_else(|| run_openclaw_config_get_json(&resolved, "agents.defaults").ok())
+      .unwrap_or_else(|| serde_json::json!({}));
+    let gateway = config_root
+      .as_ref()
+      .and_then(|root| get_json_value_at_path(root, &["gateway"]))
+      .or_else(|| run_openclaw_config_get_json(&resolved, "gateway").ok())
+      .unwrap_or_else(|| serde_json::json!({}));
+    let models_providers = config_root
+      .as_ref()
+      .and_then(|root| get_json_value_at_path(root, &["models", "providers"]))
+      .or_else(|| run_openclaw_config_get_json(&resolved, "models.providers").ok())
+      .unwrap_or_else(|| serde_json::json!({}));
 
     let workspace_dir = resolve_workspace_dir_from_agents_defaults(&agents_defaults);
     let names = collect_workspace_markdown_names(&workspace_dir)?;
