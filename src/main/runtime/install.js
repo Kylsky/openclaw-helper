@@ -5,7 +5,11 @@ const path = require("node:path");
 const os = require("node:os");
 
 const DEFAULT_OPENCLAW_PACKAGE = "openclaw";
+const DEFAULT_NPM_REGISTRY = "https://registry.npmmirror.com";
+const DEFAULT_GITHUB_MIRROR = "https://gitclone.com/github.com/";
 const MIN_NODE_MAJOR = 22;
+
+let windowsDirectGatewayProcess = null;
 
 function assertNotAborted(signal) {
   if (!signal) return;
@@ -65,7 +69,12 @@ function createBaseEnv() {
     ];
     // Prefer well-known system/brew locations over user shell shims (e.g. nvm),
     // to make the installer deterministic even when the parent shell modifies PATH.
-    env.PATH = mergePathEntries({ existingPath: env.PATH, extraEntries: extra, separator: ":", extraFirst: true });
+    env.PATH = mergePathEntries({
+      existingPath: env.PATH,
+      extraEntries: extra,
+      separator: ":",
+      extraFirst: true
+    });
   }
 
   return env;
@@ -79,6 +88,130 @@ function safeUrl(url) {
   return parsed.toString();
 }
 
+async function taskkillWindowsTreeBestEffort({ pid, env, signal, onLog }) {
+  if (!pid) return;
+  try {
+    await runProcess({
+      command: "taskkill",
+      args: ["/PID", String(pid), "/T", "/F"],
+      env,
+      signal,
+      onLog: onLog ? (line) => onLog(`[taskkill] ${line}`) : null,
+      collectOutput: false
+    });
+  } catch (error) {
+    onLog?.(`[warn] taskkill 失败（已忽略）：${error?.message || String(error)}`);
+  }
+}
+
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function extractWindowsPortFromUrl(url) {
+  const trimmed = String(url ?? "").trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = new URL(trimmed);
+    const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : parsed.protocol === "http:" ? 80 : NaN));
+    if (Number.isInteger(port) && port > 0 && port <= 65535) {
+      return port;
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
+
+async function findWindowsListeningPidsByPort({ port, env, signal }) {
+  if (!port) return [];
+
+  const script = `$ErrorActionPreference='SilentlyContinue'
+$port=${Number(port)}
+$pids=@()
+if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
+  $pids = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
+    Where-Object { $_.State -eq 'Listen' -or $_.State -eq 2 } |
+    Select-Object -ExpandProperty OwningProcess -Unique
+}
+if (-not $pids -or $pids.Count -eq 0) {
+  $lines = netstat -ano -p tcp | Select-String -Pattern (':'+$port+'\s+.*LISTENING\s+(\d+)$')
+  $pids = $lines | ForEach-Object {
+    $m = [regex]::Match($_.Line, '\s+(\d+)\s*$')
+    if ($m.Success) { [int]$m.Groups[1].Value }
+  } | Select-Object -Unique
+}
+$pids | ForEach-Object { [Console]::Out.WriteLine($_) }`;
+
+  try {
+    const result = await runProcess({
+      command: "powershell",
+      args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+      env,
+      signal,
+      collectOutput: true
+    });
+
+    const combined = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    return [...new Set(splitLines(combined).map((line) => Number.parseInt(line.trim(), 10)).filter((pid) => Number.isInteger(pid) && pid > 0))];
+  } catch {
+    return [];
+  }
+}
+
+async function getWindowsGatewayDashboardPortBestEffort({ signal, onLog } = {}) {
+  try {
+    const status = await getGatewayStatus({ signal, onLog });
+    return extractWindowsPortFromUrl(status?.dashboardUrl);
+  } catch {
+    return null;
+  }
+}
+
+async function killWindowsGatewayPortListenersBestEffort({ port, env, signal, onLog, logIfEmpty = false }) {
+  const currentPid = process.pid;
+  let pids = await findWindowsListeningPidsByPort({ port, env, signal });
+  pids = pids.filter((pid) => pid !== currentPid);
+
+  if (pids.length === 0) {
+    if (logIfEmpty) onLog?.(`[gateway] 端口 ${port} 未发现监听进程，停止完成。`);
+    return false;
+  }
+
+  for (const targetPid of pids) {
+    onLog?.(`[gateway] 停止端口 ${port} 对应进程（pid=${targetPid}）…`);
+    await taskkillWindowsTreeBestEffort({ pid: targetPid, env, signal, onLog });
+  }
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    let remaining = await findWindowsListeningPidsByPort({ port, env, signal });
+    remaining = remaining.filter((pid) => pid !== currentPid);
+    if (remaining.length === 0) {
+      onLog?.(`[gateway] 已按端口停止 ${pids.length} 个进程（port=${port}）。`);
+      return true;
+    }
+    await sleep(100);
+  }
+
+  let remaining = await findWindowsListeningPidsByPort({ port, env, signal });
+  remaining = remaining.filter((pid) => pid !== currentPid);
+  if (remaining.length === 0) {
+    onLog?.(`[gateway] 已按端口停止 ${pids.length} 个进程（port=${port}）。`);
+  } else {
+    onLog?.(`[warn] 端口 ${port} 仍有监听进程：${remaining.join(", ")}。`);
+  }
+
+  return true;
+}
+
+function isDisableKeyword(value) {
+  const lower = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return ["off", "false", "none", "direct", "disable", "disabled", "0"].includes(lower);
+}
+
 function validateNpmPackageName(name) {
   const value = String(name ?? "").trim();
   if (!value) throw new Error("openclaw 包名不能为空");
@@ -90,7 +223,7 @@ function validateNpmPackageName(name) {
   if (value.includes("..")) throw new Error("openclaw 包名不合法");
   if (value.includes("//")) throw new Error("openclaw 包名不合法");
   if (value.includes("\\")) throw new Error("openclaw 包名不合法");
-  if (value.includes("'") || value.includes("\"") || value.includes("`")) {
+  if (value.includes("'") || value.includes('"') || value.includes("`")) {
     throw new Error("openclaw 包名不合法");
   }
   return value;
@@ -98,20 +231,35 @@ function validateNpmPackageName(name) {
 
 function validateOptions(options) {
   const autoInstall = options?.autoInstall !== false;
-  const openclawPackage = validateNpmPackageName(options?.openclawPackage ?? DEFAULT_OPENCLAW_PACKAGE);
+  const openclawPackage = validateNpmPackageName(
+    options?.openclawPackage ?? DEFAULT_OPENCLAW_PACKAGE
+  );
 
-  const nodeChannel = String(options?.nodeChannel ?? "lts").trim().toLowerCase();
+  const nodeChannel = String(options?.nodeChannel ?? "lts")
+    .trim()
+    .toLowerCase();
   if (!["lts", "latest"].includes(nodeChannel)) {
     throw new Error("Node 安装通道无效（仅支持 lts / latest）");
   }
 
-  const npmRegistry = options?.npmRegistry ? safeUrl(options.npmRegistry) : null;
+  const npmRegistryRaw = options?.npmRegistry != null ? String(options.npmRegistry).trim() : "";
+  const npmRegistry = npmRegistryRaw ? safeUrl(npmRegistryRaw) : DEFAULT_NPM_REGISTRY;
+
+  const githubMirrorRaw = options?.githubMirror != null ? String(options.githubMirror).trim() : "";
+  let githubMirror = "";
+  if (githubMirrorRaw) {
+    githubMirror = isDisableKeyword(githubMirrorRaw) ? "" : safeUrl(githubMirrorRaw);
+  } else if (process.platform === "win32") {
+    githubMirror = DEFAULT_GITHUB_MIRROR;
+  }
+  if (githubMirror && !githubMirror.endsWith("/")) githubMirror += "/";
 
   return {
     autoInstall,
     openclawPackage,
     nodeChannel,
-    npmRegistry
+    npmRegistry,
+    githubMirror
   };
 }
 
@@ -251,7 +399,15 @@ async function runWindowsShim({ baseCommand, args, env, signal, onLog, collectOu
   }
 
   try {
-    return await runProcess({ command: baseCommand, args, env, signal, onLog, shell: true, collectOutput });
+    return await runProcess({
+      command: baseCommand,
+      args,
+      env,
+      signal,
+      onLog,
+      shell: true,
+      collectOutput
+    });
   } catch (error) {
     throw lastNotFound ?? error;
   }
@@ -340,14 +496,41 @@ async function refreshWindowsPath({ env, signal, onLog }) {
   return { ...baseEnv, PATH: merged };
 }
 
+function getWindowsOsArch(env) {
+  if (process.platform !== "win32") return null;
+
+  const base = env ?? process.env;
+  const raw = String(base.PROCESSOR_ARCHITEW6432 || base.PROCESSOR_ARCHITECTURE || "")
+    .trim()
+    .toLowerCase();
+
+  if (!raw) return null;
+  if (raw.includes("arm64")) return "arm64";
+  if (raw.includes("amd64") || raw === "x64") return "x64";
+  if (raw.includes("86") || raw === "x86" || raw === "ia32") return "ia32";
+  return null;
+}
+
+function getWingetArchitectureArg(osArch) {
+  if (!osArch) return null;
+  if (osArch === "x64") return "x64";
+  if (osArch === "arm64") return "arm64";
+  if (osArch === "ia32") return "x86";
+  return null;
+}
+
 function parseSemverMajor(text) {
-  const match = String(text ?? "").trim().match(/(\d+)\.(\d+)\.(\d+)/);
+  const match = String(text ?? "")
+    .trim()
+    .match(/(\d+)\.(\d+)\.(\d+)/);
   if (!match) return null;
   return Number(match[1]);
 }
 
 function parseSemverTuple(text) {
-  const match = String(text ?? "").trim().match(/(\d+)\.(\d+)\.(\d+)/);
+  const match = String(text ?? "")
+    .trim()
+    .match(/(\d+)\.(\d+)\.(\d+)/);
   if (!match) return null;
   return [Number(match[1]), Number(match[2]), Number(match[3])];
 }
@@ -366,6 +549,65 @@ function fileExistsSync(filePath) {
   } catch {
     return false;
   }
+}
+
+async function getNodeRuntimeInfo({ env, signal, onLog }) {
+  const hasNode = await commandExists("node", { env, signal });
+  if (!hasNode) return null;
+
+  let versionText = null;
+  let major = null;
+  let arch = null;
+  let whereFirst = null;
+
+  try {
+    const v = await runProcess({ command: "node", args: ["-v"], env, signal, collectOutput: true });
+    versionText = String(v.stdout ?? "")
+      .trim()
+      .replace(/^v/, "");
+    major = parseSemverMajor(versionText);
+  } catch {
+    versionText = null;
+    major = null;
+  }
+
+  try {
+    const a = await runProcess({
+      command: "node",
+      args: ["-p", "process.arch"],
+      env,
+      signal,
+      collectOutput: true
+    });
+    arch = splitLines(`${a.stdout ?? ""}\n${a.stderr ?? ""}`)[0]?.trim() ?? null;
+  } catch {
+    arch = null;
+  }
+
+  if (process.platform === "win32") {
+    try {
+      const w = await runProcess({
+        command: "where",
+        args: ["node"],
+        env,
+        signal,
+        collectOutput: true
+      });
+      whereFirst = splitLines(`${w.stdout ?? ""}\n${w.stderr ?? ""}`)[0]?.trim() ?? null;
+    } catch {
+      whereFirst = null;
+    }
+  }
+
+  if (onLog) {
+    const parts = [];
+    if (versionText) parts.push(`version=${versionText}`);
+    if (arch) parts.push(`arch=${arch}`);
+    if (whereFirst) parts.push(`path=${whereFirst}`);
+    if (parts.length) onLog(`Node 信息：${parts.join(", ")}`);
+  }
+
+  return { versionText, major, arch, whereFirst };
 }
 
 async function resolveNpmGlobalPrefix({ env, signal, onLog }) {
@@ -398,7 +640,10 @@ async function resolveNpmGlobalPrefix({ env, signal, onLog }) {
 
 async function resolveOpenclawExecution({ env, signal, onLog } = {}) {
   const baseEnv = env ?? createBaseEnv();
-  const resolvedEnv = process.platform === "win32" ? await refreshWindowsPath({ env: baseEnv, signal, onLog }) : baseEnv;
+  const resolvedEnv =
+    process.platform === "win32"
+      ? await refreshWindowsPath({ env: baseEnv, signal, onLog })
+      : baseEnv;
 
   // 1) Fast path: already in PATH.
   const hasOpenclaw = await commandExists("openclaw", { env: resolvedEnv, signal, onLog });
@@ -406,8 +651,20 @@ async function resolveOpenclawExecution({ env, signal, onLog } = {}) {
     try {
       const pathResult =
         process.platform === "win32"
-          ? await runProcess({ command: "where", args: ["openclaw"], env: resolvedEnv, signal, collectOutput: true })
-          : await runProcess({ command: "/usr/bin/which", args: ["openclaw"], env: resolvedEnv, signal, collectOutput: true });
+          ? await runProcess({
+              command: "where",
+              args: ["openclaw"],
+              env: resolvedEnv,
+              signal,
+              collectOutput: true
+            })
+          : await runProcess({
+              command: "/usr/bin/which",
+              args: ["openclaw"],
+              env: resolvedEnv,
+              signal,
+              collectOutput: true
+            });
       const first = splitLines(`${pathResult.stdout ?? ""}\n${pathResult.stderr ?? ""}`)[0]?.trim();
       if (first) return { command: first, env: resolvedEnv, source: "path" };
     } catch {
@@ -420,7 +677,8 @@ async function resolveOpenclawExecution({ env, signal, onLog } = {}) {
   if (process.platform === "darwin") {
     const brewCandidates = ["/opt/homebrew/bin/openclaw", "/usr/local/bin/openclaw"];
     for (const candidate of brewCandidates) {
-      if (fileExistsSync(candidate)) return { command: candidate, env: resolvedEnv, source: "brew_bin" };
+      if (fileExistsSync(candidate))
+        return { command: candidate, env: resolvedEnv, source: "brew_bin" };
     }
   }
 
@@ -429,7 +687,10 @@ async function resolveOpenclawExecution({ env, signal, onLog } = {}) {
     const prefix = await resolveNpmGlobalPrefix({ env: resolvedEnv, signal, onLog });
     if (prefix) {
       const binDir = path.join(prefix, "bin");
-      const candidate = process.platform === "win32" ? path.join(prefix, "openclaw.cmd") : path.join(binDir, "openclaw");
+      const candidate =
+        process.platform === "win32"
+          ? path.join(prefix, "openclaw.cmd")
+          : path.join(binDir, "openclaw");
 
       const separator = process.platform === "win32" ? ";" : ":";
       const mergedPath = mergePathEntries({
@@ -439,7 +700,8 @@ async function resolveOpenclawExecution({ env, signal, onLog } = {}) {
       });
       const envWithBin = { ...resolvedEnv, PATH: mergedPath };
 
-      if (fileExistsSync(candidate)) return { command: candidate, env: envWithBin, source: "npm_prefix" };
+      if (fileExistsSync(candidate))
+        return { command: candidate, env: envWithBin, source: "npm_prefix" };
 
       // If file isn't present but PATH includes it now, still attempt direct execution.
       const hasAfterPath = await commandExists("openclaw", { env: envWithBin, signal, onLog });
@@ -588,7 +850,10 @@ async function ensureNvm({ env, signal, onLog, options, context }) {
 
   await fs.mkdir(path.join(os.homedir(), ".nvm"), { recursive: true });
 
-  nvmSourcePath = await getMacNvmSourcePath({ brewPath: resolvedBrew === "brew" ? null : brewPath, env: context.env });
+  nvmSourcePath = await getMacNvmSourcePath({
+    brewPath: resolvedBrew === "brew" ? null : brewPath,
+    env: context.env
+  });
   if (!nvmSourcePath) {
     nvmSourcePath = await getMacNvmSourcePath({ brewPath, env: context.env });
   }
@@ -603,44 +868,148 @@ async function ensureNvm({ env, signal, onLog, options, context }) {
 
 async function ensureNode({ env, signal, onLog, options, context }) {
   if (process.platform === "win32") {
-    const hasNode = await commandExists("node", { env, signal });
-    const hasNpm = await commandExists("npm", { env, signal });
+    const osArch = getWindowsOsArch(context.env ?? env);
+    if (osArch === "ia32") {
+      throw new Error(
+        "检测到 32 位 Windows（x86）。当前 openclaw 安装需要 64 位 Windows（x64）。\n" +
+          "请安装 64 位 Windows，或在 64 位机器上运行本安装器；也可考虑使用 WSL2。"
+      );
+    }
 
-    if (hasNode && hasNpm) {
-      onLog?.("已检测到 Node.js / npm（Windows）");
+    const hasNpm = await commandExists("npm", { env, signal });
+    const nodeInfo = await getNodeRuntimeInfo({ env, signal, onLog }).catch(() => null);
+
+    const nodeOkByVersion = nodeInfo?.major != null && nodeInfo.major >= MIN_NODE_MAJOR;
+    const nodeOkByArch = osArch === "x64" ? nodeInfo?.arch === "x64" : true;
+    const nodeOk = Boolean(nodeInfo) && hasNpm && nodeOkByVersion && nodeOkByArch;
+
+    if (nodeOk) {
+      onLog?.(
+        `已检测到 Node.js / npm（Windows, major=${nodeInfo.major}, arch=${nodeInfo.arch ?? "unknown"}）`
+      );
       return;
     }
 
+    const problems = [];
+    if (!nodeInfo) problems.push("未检测到 node");
+    if (nodeInfo && !hasNpm) problems.push("未检测到 npm");
+    if (nodeInfo && !nodeOkByVersion) {
+      problems.push(
+        `Node 版本过低（major=${nodeInfo.major ?? "unknown"}，需要 >= ${MIN_NODE_MAJOR}）`
+      );
+    }
+    if (nodeInfo && !nodeOkByArch && osArch === "x64") {
+      problems.push(`Node 架构不匹配（当前 node=${nodeInfo.arch ?? "unknown"}，系统=${osArch}）`);
+    }
+
+    if (osArch === "arm64") {
+      onLog?.(
+        "检测到 Windows ARM64。若后续出现预编译二进制（win-x64）不兼容，建议改用 WSL2（Linux）安装。"
+      );
+    }
+
     if (!options.autoInstall) {
-      throw new Error("未检测到 Node.js。请先手动安装 Node.js（建议 LTS），然后重试。");
+      throw new Error(
+        `Node.js 环境不满足要求：${problems.join("；") || "未知原因"}。\n` +
+          `openclaw 需要 Node.js >= ${MIN_NODE_MAJOR}，且在 Windows x64 上建议使用 x64 Node。\n` +
+          "请先安装/升级 Node.js（建议 LTS 或 latest），然后重试。"
+      );
     }
 
     await ensureWinget({ env, signal });
-    onLog?.("正在通过 winget 安装 Node.js（LTS）…");
-    await runProcess({
-      command: "winget",
-      args: [
-        "install",
-        "-e",
-        "--id",
-        "OpenJS.NodeJS.LTS",
-        "--accept-package-agreements",
-        "--accept-source-agreements"
-      ],
-      env,
-      signal,
-      onLog
-    });
+
+    const nodePackageId = options.nodeChannel === "latest" ? "OpenJS.NodeJS" : "OpenJS.NodeJS.LTS";
+    const wingetArch = getWingetArchitectureArg(osArch);
+
+    const installArgs = [
+      "install",
+      "-e",
+      "--id",
+      nodePackageId,
+      "--accept-package-agreements",
+      "--accept-source-agreements"
+    ];
+    if (wingetArch) installArgs.push("--architecture", wingetArch);
+
+    const upgradeArgs = [
+      "upgrade",
+      "-e",
+      "--id",
+      nodePackageId,
+      "--accept-package-agreements",
+      "--accept-source-agreements"
+    ];
+    if (wingetArch) upgradeArgs.push("--architecture", wingetArch);
+
+    onLog?.(
+      `正在通过 winget 安装/升级 Node.js（${options.nodeChannel === "latest" ? "latest" : "LTS"}${wingetArch ? `, ${wingetArch}` : ""}）…`
+    );
+
+    // Try upgrade first (no-op if already up-to-date). Some winget versions may return success even when
+    // the package isn't installed, so we verify after and fall back to install if needed.
+    try {
+      await runProcess({ command: "winget", args: upgradeArgs, env, signal, onLog });
+    } catch {
+      // ignore and verify below; we'll try install if Node is still not usable.
+    }
 
     context.env = await refreshWindowsPath({ env: context.env, signal, onLog });
 
-    const nowHasNode = await commandExists("node", { env: context.env, signal });
-    const nowHasNpm = await commandExists("npm", { env: context.env, signal });
-    if (!nowHasNode || !nowHasNpm) {
-      throw new Error("Node.js 安装完成但当前进程未检测到 node/npm。请重启安装器后重试。");
+    // Nudge PATH to prefer the standard Node installer location if present.
+    const programFilesNode = "C:\\\\Program Files\\\\nodejs";
+    const programFilesX86Node = "C:\\\\Program Files (x86)\\\\nodejs";
+    context.env.PATH = mergePathEntries({
+      existingPath: context.env.PATH,
+      extraEntries: [programFilesNode, programFilesX86Node],
+      separator: ";",
+      extraFirst: true
+    });
+
+    const afterHasNpm = await commandExists("npm", { env: context.env, signal });
+    const afterNodeInfo = await getNodeRuntimeInfo({ env: context.env, signal, onLog }).catch(
+      () => null
+    );
+    const afterOkByVersion = afterNodeInfo?.major != null && afterNodeInfo.major >= MIN_NODE_MAJOR;
+    const afterOkByArch = osArch === "x64" ? afterNodeInfo?.arch === "x64" : true;
+
+    if (!afterNodeInfo || !afterHasNpm || !afterOkByVersion || !afterOkByArch) {
+      // Fall back to install if upgrade did not result in a usable Node.
+      await runProcess({ command: "winget", args: installArgs, env, signal, onLog });
+
+      context.env = await refreshWindowsPath({ env: context.env, signal, onLog });
+      context.env.PATH = mergePathEntries({
+        existingPath: context.env.PATH,
+        extraEntries: [programFilesNode, programFilesX86Node],
+        separator: ";",
+        extraFirst: true
+      });
     }
 
-    onLog?.("Node.js 安装完成");
+    const finalHasNpm = await commandExists("npm", { env: context.env, signal });
+    const finalNodeInfo = await getNodeRuntimeInfo({ env: context.env, signal, onLog }).catch(
+      () => null
+    );
+    const finalOkByVersion = finalNodeInfo?.major != null && finalNodeInfo.major >= MIN_NODE_MAJOR;
+    const finalOkByArch = osArch === "x64" ? finalNodeInfo?.arch === "x64" : true;
+
+    if (!finalNodeInfo || !finalHasNpm) {
+      throw new Error("Node.js 安装完成但当前进程未检测到 node/npm。请重启安装器后重试。");
+    }
+    if (!finalOkByVersion) {
+      throw new Error(
+        `Node.js 安装完成，但版本不满足要求（检测到：${finalNodeInfo.versionText || "unknown"}，需要 >= ${MIN_NODE_MAJOR}）。`
+      );
+    }
+    if (!finalOkByArch && osArch === "x64") {
+      throw new Error(
+        `Node.js 安装完成，但检测到的 node 架构仍为 ${finalNodeInfo.arch ?? "unknown"}（系统为 x64）。\n` +
+          "这通常是因为 PATH 里仍优先命中了旧的 32 位 Node。请重启安装器/系统后重试，或手动卸载 32 位 Node。"
+      );
+    }
+
+    onLog?.(
+      `Node.js 安装完成（Windows, major=${finalNodeInfo.major}, arch=${finalNodeInfo.arch ?? "unknown"}）`
+    );
     return;
   }
 
@@ -650,8 +1019,16 @@ async function ensureNode({ env, signal, onLog, options, context }) {
   let currentMajor = null;
   if (hasNode) {
     try {
-      const result = await runProcess({ command: "node", args: ["-v"], env, signal, collectOutput: true });
-      currentMajor = parseSemverMajor(String(result.stdout ?? "").replace(/^v/, "")) ?? parseSemverMajor(result.stdout ?? "");
+      const result = await runProcess({
+        command: "node",
+        args: ["-v"],
+        env,
+        signal,
+        collectOutput: true
+      });
+      currentMajor =
+        parseSemverMajor(String(result.stdout ?? "").replace(/^v/, "")) ??
+        parseSemverMajor(result.stdout ?? "");
     } catch {
       currentMajor = null;
     }
@@ -692,9 +1069,21 @@ async function ensureNode({ env, signal, onLog, options, context }) {
   }
 
   if (hasBrewNode) {
-    await runProcess({ command: brewCmd, args: ["upgrade", "node"], env: context.env, signal, onLog }).catch(() => null);
+    await runProcess({
+      command: brewCmd,
+      args: ["upgrade", "node"],
+      env: context.env,
+      signal,
+      onLog
+    }).catch(() => null);
   } else {
-    await runProcess({ command: brewCmd, args: ["install", "node"], env: context.env, signal, onLog });
+    await runProcess({
+      command: brewCmd,
+      args: ["install", "node"],
+      env: context.env,
+      signal,
+      onLog
+    });
   }
 
   const nowHasNode = await commandExists("node", { env: context.env, signal });
@@ -703,7 +1092,13 @@ async function ensureNode({ env, signal, onLog, options, context }) {
     throw new Error("Node.js 安装完成但未检测到 node/npm（可能需要重启终端/安装器）。");
   }
 
-  const after = await runProcess({ command: "node", args: ["-v"], env: context.env, signal, collectOutput: true });
+  const after = await runProcess({
+    command: "node",
+    args: ["-v"],
+    env: context.env,
+    signal,
+    collectOutput: true
+  });
   const major = parseSemverMajor(String(after.stdout ?? "").replace(/^v/, "")) ?? null;
   if (!major || major < MIN_NODE_MAJOR) {
     throw new Error(
@@ -760,7 +1155,13 @@ async function ensureGit({ env, signal, onLog, options, context }) {
 
   if (brewCmd) {
     onLog?.("正在通过 brew 安装 Git…");
-    await runProcess({ command: brewCmd, args: ["install", "git"], env: context.env, signal, onLog });
+    await runProcess({
+      command: brewCmd,
+      args: ["install", "git"],
+      env: context.env,
+      signal,
+      onLog
+    });
     const nowHasGit = await commandExists("git", { env: context.env, signal });
     if (!nowHasGit) {
       throw new Error("Git 安装完成但未检测到 git（可能需要重启终端/安装器）。");
@@ -771,7 +1172,9 @@ async function ensureGit({ env, signal, onLog, options, context }) {
 
   // No Homebrew: fall back to Xcode Command Line Tools (git is provided by Apple).
   if (!options.autoInstall) {
-    throw new Error("未检测到 Git。请先安装 Xcode Command Line Tools（或手动安装 Git），然后重试。");
+    throw new Error(
+      "未检测到 Git。请先安装 Xcode Command Line Tools（或手动安装 Git），然后重试。"
+    );
   }
 
   onLog?.("未检测到 Homebrew，尝试触发 Xcode Command Line Tools 安装（将弹出系统提示）…");
@@ -803,18 +1206,66 @@ async function verifyEnvironment({ env, signal, onLog, options: _options, contex
     await runProcess({ command: "nvm", args: ["version"], env, signal, onLog }).catch(async () => {
       await runProcess({ command: "nvm", args: ["--version"], env, signal, onLog });
     });
-    await runProcess({ command: "node", args: ["-v"], env, signal, onLog });
+    const nodeResult = await runProcess({
+      command: "node",
+      args: ["-v"],
+      env,
+      signal,
+      onLog,
+      collectOutput: true
+    });
+    const versionText = String(nodeResult.stdout ?? "")
+      .trim()
+      .replace(/^v/, "");
+    const major = parseSemverMajor(versionText);
+    const osArch = getWindowsOsArch(env);
+    let nodeArch = null;
+    try {
+      const archResult = await runProcess({
+        command: "node",
+        args: ["-p", "process.arch"],
+        env,
+        signal,
+        collectOutput: true
+      });
+      nodeArch =
+        splitLines(`${archResult.stdout ?? ""}\n${archResult.stderr ?? ""}`)[0]?.trim() ?? null;
+    } catch {
+      nodeArch = null;
+    }
+
+    if (!major || major < MIN_NODE_MAJOR) {
+      throw new Error(
+        `Node.js 版本不满足要求（检测到：${versionText || "unknown"}，需要 >= ${MIN_NODE_MAJOR}）。`
+      );
+    }
+    if (osArch === "x64" && nodeArch && nodeArch !== "x64") {
+      throw new Error(
+        `Node.js 架构不匹配（系统为 x64，但当前 node arch=${nodeArch}）。请安装/切换到 x64 Node。`
+      );
+    }
     await runWindowsShim({ baseCommand: "npm", args: ["-v"], env, signal, onLog });
     await runProcess({ command: "git", args: ["--version"], env, signal, onLog });
-    onLog?.("环境校验通过（Windows）");
+    onLog?.(`环境校验通过（Windows, Node major=${major}${nodeArch ? `, arch=${nodeArch}` : ""}）`);
     return;
   }
 
-  const nodeResult = await runProcess({ command: "node", args: ["-v"], env, signal, onLog, collectOutput: true });
-  const versionText = String(nodeResult.stdout ?? "").trim().replace(/^v/, "");
+  const nodeResult = await runProcess({
+    command: "node",
+    args: ["-v"],
+    env,
+    signal,
+    onLog,
+    collectOutput: true
+  });
+  const versionText = String(nodeResult.stdout ?? "")
+    .trim()
+    .replace(/^v/, "");
   const major = parseSemverMajor(versionText);
   if (!major || major < MIN_NODE_MAJOR) {
-    throw new Error(`Node.js 版本不满足要求（检测到：${versionText || "unknown"}，需要 >= ${MIN_NODE_MAJOR}）。`);
+    throw new Error(
+      `Node.js 版本不满足要求（检测到：${versionText || "unknown"}，需要 >= ${MIN_NODE_MAJOR}）。`
+    );
   }
 
   await runProcess({ command: "npm", args: ["-v"], env, signal, onLog });
@@ -823,11 +1274,52 @@ async function verifyEnvironment({ env, signal, onLog, options: _options, contex
   onLog?.(`环境校验通过（macOS, Node major=${major}）`);
 }
 
+function withGithubSshRewriteEnv(env, { onLog, githubMirror } = {}) {
+  if (process.platform !== "win32") return env;
+  const out = { ...(env || {}) };
+  const mirror = githubMirror ? String(githubMirror).trim() : "";
+  if (mirror) {
+    onLog?.(`已启用 GitHub 镜像：${mirror}（用于加速/绕过 GitHub 访问问题；仅本次安装进程生效）`);
+    out.GIT_CONFIG_COUNT = "3";
+    out.GIT_CONFIG_KEY_0 = `url.${mirror}.insteadOf`;
+    out.GIT_CONFIG_VALUE_0 = "ssh://git@github.com/";
+    out.GIT_CONFIG_KEY_1 = `url.${mirror}.insteadOf`;
+    out.GIT_CONFIG_VALUE_1 = "git@github.com:";
+    out.GIT_CONFIG_KEY_2 = `url.${mirror}.insteadOf`;
+    out.GIT_CONFIG_VALUE_2 = "https://github.com/";
+    return out;
+  }
+
+  onLog?.("已启用 GitHub SSH -> HTTPS 重写（避免 git@github.com 权限问题；仅本次安装进程生效）");
+  out.GIT_CONFIG_COUNT = "2";
+  out.GIT_CONFIG_KEY_0 = "url.https://github.com/.insteadOf";
+  out.GIT_CONFIG_VALUE_0 = "ssh://git@github.com/";
+  out.GIT_CONFIG_KEY_1 = "url.https://github.com/.insteadOf";
+  out.GIT_CONFIG_VALUE_1 = "git@github.com:";
+  return out;
+}
+
 async function installOpenclaw({ env, signal, onLog, options, context: _context }) {
   onLog?.(`开始安装：npm install -g ${options.openclawPackage}`);
 
   if (process.platform === "win32") {
-    await runWindowsShim({ baseCommand: "npm", args: ["install", "-g", options.openclawPackage], env, signal, onLog });
+    const installEnv = withGithubSshRewriteEnv(
+      {
+        ...(env || {}),
+        NODE_LLAMA_CPP_SKIP_DOWNLOAD: "1"
+      },
+      { onLog, githubMirror: options.githubMirror }
+    );
+    onLog?.(
+      "NODE_LLAMA_CPP_SKIP_DOWNLOAD=1（跳过 node-llama-cpp 安装期下载/编译，提升 Windows 安装成功率）"
+    );
+    await runWindowsShim({
+      baseCommand: "npm",
+      args: ["install", "-g", options.openclawPackage],
+      env: installEnv,
+      signal,
+      onLog
+    });
 
     onLog?.("全局安装完成，尝试验证 openclaw 命令…");
     try {
@@ -839,7 +1331,13 @@ async function installOpenclaw({ env, signal, onLog, options, context: _context 
     return;
   }
 
-  await runProcess({ command: "npm", args: ["install", "-g", options.openclawPackage], env, signal, onLog });
+  await runProcess({
+    command: "npm",
+    args: ["install", "-g", options.openclawPackage],
+    env,
+    signal,
+    onLog
+  });
 
   const verify = async () => {
     const resolved = await resolveOpenclawExecution({ env, signal, onLog });
@@ -863,7 +1361,13 @@ async function installOpenclaw({ env, signal, onLog, options, context: _context 
   if (ok) return;
 
   onLog?.("未能直接运行 openclaw，尝试修复（npm --force 重新生成全局命令链接）…");
-  await runProcess({ command: "npm", args: ["install", "-g", options.openclawPackage, "--force"], env, signal, onLog });
+  await runProcess({
+    command: "npm",
+    args: ["install", "-g", options.openclawPackage, "--force"],
+    env,
+    signal,
+    onLog
+  });
 
   const ok2 = await verify();
   if (ok2) return;
@@ -878,11 +1382,18 @@ async function installOpenclaw({ env, signal, onLog, options, context: _context 
   );
 }
 
-async function uninstallOpenclaw({ signal, onLog, openclawPackage: _openclawPackage = DEFAULT_OPENCLAW_PACKAGE } = {}) {
+async function uninstallOpenclaw({
+  signal,
+  onLog,
+  openclawPackage: _openclawPackage = DEFAULT_OPENCLAW_PACKAGE
+} = {}) {
   const openclawPackage = validateNpmPackageName(_openclawPackage);
 
   const baseEnv = createBaseEnv();
-  const env = process.platform === "win32" ? await refreshWindowsPath({ env: baseEnv, signal, onLog }) : baseEnv;
+  const env =
+    process.platform === "win32"
+      ? await refreshWindowsPath({ env: baseEnv, signal, onLog })
+      : baseEnv;
 
   const resolved = await resolveOpenclawExecution({ env, signal, onLog });
   const resolvedPath =
@@ -1039,7 +1550,11 @@ async function uninstallOpenclaw({ signal, onLog, openclawPackage: _openclawPack
       const brewCmd = await getBrewCommand();
       if (brewCmd) {
         onLog?.(`${brewCmd} uninstall openclaw`);
-        const result = await runSimple({ command: brewCmd, args: ["uninstall", "openclaw"], prefix: "[brew]" });
+        const result = await runSimple({
+          command: brewCmd,
+          args: ["uninstall", "openclaw"],
+          prefix: "[brew]"
+        });
         attempts.push({ kind: "brew", result });
         summarizeAttempt("brew", result);
         // Even if brew uninstall fails, keep going: the binary in /opt/homebrew/bin can be from npm.
@@ -1060,7 +1575,8 @@ async function uninstallOpenclaw({ signal, onLog, openclawPackage: _openclawPack
     };
 
     const nvmNpm =
-      resolvedPath && resolvedPath.includes(`${path.sep}.nvm${path.sep}versions${path.sep}node${path.sep}`)
+      resolvedPath &&
+      resolvedPath.includes(`${path.sep}.nvm${path.sep}versions${path.sep}node${path.sep}`)
         ? path.join(path.dirname(resolvedPath), process.platform === "win32" ? "npm.cmd" : "npm")
         : null;
 
@@ -1109,7 +1625,9 @@ async function uninstallOpenclaw({ signal, onLog, openclawPackage: _openclawPack
     }
 
     if (stillResolved?.command) onLog?.(`CLI 仍存在：${stillResolved.command}`);
-    onLog?.("已尝试移除 CLI，但检测到系统中仍有 openclaw（可能来自其它 Node/路径）。如需彻底清理，请运行诊断并根据输出卸载对应来源。");
+    onLog?.(
+      "已尝试移除 CLI，但检测到系统中仍有 openclaw（可能来自其它 Node/路径）。如需彻底清理，请运行诊断并根据输出卸载对应来源。"
+    );
   };
 
   // 1) Always run OpenClaw's own uninstaller (service/state/workspace). Non-interactive.
@@ -1152,22 +1670,32 @@ async function runInstall({ signal, options, onProgress, onLog }) {
   const steps =
     process.platform === "win32"
       ? [
-          { id: "nvm", title: "安装 nvm", run: () => ensureNvm({ env: context.env, signal, onLog, options: validated, context }) },
+          {
+            id: "nvm",
+            title: "安装 nvm",
+            run: () => ensureNvm({ env: context.env, signal, onLog, options: validated, context })
+          },
           {
             id: "node",
             title: "安装 Node.js",
             run: () => ensureNode({ env: context.env, signal, onLog, options: validated, context })
           },
-          { id: "git", title: "安装 Git", run: () => ensureGit({ env: context.env, signal, onLog, options: validated, context }) },
+          {
+            id: "git",
+            title: "安装 Git",
+            run: () => ensureGit({ env: context.env, signal, onLog, options: validated, context })
+          },
           {
             id: "verify",
             title: "环境校验",
-            run: () => verifyEnvironment({ env: context.env, signal, onLog, options: validated, context })
+            run: () =>
+              verifyEnvironment({ env: context.env, signal, onLog, options: validated, context })
           },
           {
             id: "openclaw",
             title: "安装 openclaw",
-            run: () => installOpenclaw({ env: context.env, signal, onLog, options: validated, context })
+            run: () =>
+              installOpenclaw({ env: context.env, signal, onLog, options: validated, context })
           }
         ]
       : [
@@ -1176,16 +1704,22 @@ async function runInstall({ signal, options, onProgress, onLog }) {
             title: "安装 Node.js",
             run: () => ensureNode({ env: context.env, signal, onLog, options: validated, context })
           },
-          { id: "git", title: "安装 Git", run: () => ensureGit({ env: context.env, signal, onLog, options: validated, context }) },
+          {
+            id: "git",
+            title: "安装 Git",
+            run: () => ensureGit({ env: context.env, signal, onLog, options: validated, context })
+          },
           {
             id: "verify",
             title: "环境校验",
-            run: () => verifyEnvironment({ env: context.env, signal, onLog, options: validated, context })
+            run: () =>
+              verifyEnvironment({ env: context.env, signal, onLog, options: validated, context })
           },
           {
             id: "openclaw",
             title: "安装 openclaw",
-            run: () => installOpenclaw({ env: context.env, signal, onLog, options: validated, context })
+            run: () =>
+              installOpenclaw({ env: context.env, signal, onLog, options: validated, context })
           }
         ];
 
@@ -1225,22 +1759,34 @@ function parseVersionFromOutput(text) {
 async function getOpenclawInfo({ withHelp = false } = {}) {
   const env = createBaseEnv();
   const resolved = await resolveOpenclawExecution({ env });
-  const base = resolved?.env ?? (process.platform === "win32" ? await refreshWindowsPath({ env }) : env);
+  const base =
+    resolved?.env ?? (process.platform === "win32" ? await refreshWindowsPath({ env }) : env);
   const command = resolved?.command ?? "openclaw";
 
   try {
     const versionResult =
       process.platform === "win32"
-        ? await runWindowsShim({ baseCommand: command, args: ["--version"], env: base, collectOutput: true })
+        ? await runWindowsShim({
+            baseCommand: command,
+            args: ["--version"],
+            env: base,
+            collectOutput: true
+          })
         : await runProcess({ command, args: ["--version"], env: base, collectOutput: true });
 
-    const version = parseVersionFromOutput(`${versionResult.stdout}\n${versionResult.stderr}`) ?? "unknown";
+    const version =
+      parseVersionFromOutput(`${versionResult.stdout}\n${versionResult.stderr}`) ?? "unknown";
 
     let trimmedHelp = null;
     if (withHelp) {
       const helpResult =
         process.platform === "win32"
-          ? await runWindowsShim({ baseCommand: command, args: ["--help"], env: base, collectOutput: true })
+          ? await runWindowsShim({
+              baseCommand: command,
+              args: ["--help"],
+              env: base,
+              collectOutput: true
+            })
           : await runProcess({ command, args: ["--help"], env: base, collectOutput: true });
 
       const helpText = `${helpResult.stdout}\n${helpResult.stderr}`.trim();
@@ -1273,11 +1819,84 @@ async function runOpenclawCommand({ signal, args, onLog }) {
   if (!resolved) throw new Error("未检测到 openclaw，请先完成安装。");
   const baseEnv = resolved.env;
 
+  // Windows: by default, avoid Scheduled Task service and run gateway directly (no admin).
+  if (process.platform === "win32" && args?.[0] === "gateway" && args.length >= 2) {
+    const isStart = args[1] === "start" && args.length === 2;
+    const isStop = args[1] === "stop" && args.length === 2;
+    if (isStart) {
+      if (windowsDirectGatewayProcess?.pid && windowsDirectGatewayProcess.exitCode == null) {
+        onLog?.("[gateway] 已在运行（direct）");
+        return { ok: true };
+      }
+
+      const finalArgs = ["--no-color", "gateway"];
+      onLog?.(`[windows] gateway start => openclaw ${finalArgs.join(" ")} (direct)`);
+      const child = spawn(resolved.command, finalArgs, {
+        env: baseEnv,
+        windowsHide: true,
+        detached: false,
+        stdio: ["ignore", "ignore", "ignore"]
+      });
+      windowsDirectGatewayProcess = child;
+      try {
+        child.unref();
+      } catch {
+        // ignore
+      }
+      onLog?.(`[gateway] direct started (pid=${child.pid})`);
+      onLog?.("[tip] 若状态未及时刷新，请等待几秒后点击“检查网关状态”。");
+      return { ok: true };
+    }
+
+    if (isStop) {
+      const dashboardPort = await getWindowsGatewayDashboardPortBestEffort({ signal, onLog });
+      let stopped = false;
+      const pid = windowsDirectGatewayProcess?.pid;
+      if (pid) {
+        onLog?.(`[gateway] 停止 direct 进程（pid=${pid}）…`);
+        await taskkillWindowsTreeBestEffort({ pid, env: baseEnv, signal, onLog });
+        windowsDirectGatewayProcess = null;
+        stopped = true;
+      }
+
+      windowsDirectGatewayProcess = null;
+
+      if (dashboardPort) {
+        if (!stopped) {
+          onLog?.(`[gateway] 未找到 tracked pid，尝试按端口强制停止（port=${dashboardPort}）…`);
+        }
+        const killedByPort = await killWindowsGatewayPortListenersBestEffort({
+          port: dashboardPort,
+          env: baseEnv,
+          signal,
+          onLog,
+          logIfEmpty: !stopped
+        });
+        stopped = stopped || killedByPort;
+      } else if (!stopped) {
+        onLog?.("[gateway] 未从 gateway status 解析到 Dashboard 端口，跳过端口强杀。");
+      }
+
+      if (stopped) {
+        onLog?.("[gateway] direct stopped");
+      } else {
+        onLog?.("[gateway] 未发现可停止的网关监听进程（已跳过 Scheduled Task 停止）。");
+      }
+      return { ok: true };
+    }
+  }
+
   const finalArgs = ["--no-color", ...args];
   onLog?.(`openclaw ${finalArgs.join(" ")} (${resolved.source})`);
 
   if (process.platform === "win32") {
-    await runWindowsShim({ baseCommand: resolved.command, args: finalArgs, env: baseEnv, signal, onLog });
+    await runWindowsShim({
+      baseCommand: resolved.command,
+      args: finalArgs,
+      env: baseEnv,
+      signal,
+      onLog
+    });
     return { ok: true };
   }
 
@@ -1340,8 +1959,7 @@ function parseGatewayStatusFromText(text) {
     /\bfailed\b/i.test(lower);
 
   const hasLoaded =
-    /\bloaded:\s*loaded\b/i.test(raw) ||
-    (/\(loaded\)/i.test(raw) && !/\(not loaded\)/i.test(raw));
+    /\bloaded:\s*loaded\b/i.test(raw) || (/\(loaded\)/i.test(raw) && !/\(not loaded\)/i.test(raw));
 
   const hasNotInstalled =
     /service not installed/i.test(raw) ||

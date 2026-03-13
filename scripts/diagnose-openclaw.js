@@ -31,7 +31,10 @@ const whichNpm = run("which", ["npm"]);
 line("which npm", whichNpm.ok ? whichNpm.stdout : "(not found)");
 
 const npmVersion = run("npm", ["-v"]);
-line("npm -v", npmVersion.ok ? npmVersion.stdout : `(failed: ${npmVersion.stderr || npmVersion.status})`);
+line(
+  "npm -v",
+  npmVersion.ok ? npmVersion.stdout : `(failed: ${npmVersion.stderr || npmVersion.status})`
+);
 
 const npmPrefix = run("npm", ["prefix", "-g"]);
 const prefix = npmPrefix.ok ? firstLine(npmPrefix.stdout) : null;
@@ -48,7 +51,12 @@ const whichOpenclaw = run("which", ["openclaw"]);
 line("which openclaw", whichOpenclaw.ok ? whichOpenclaw.stdout : "(not found)");
 
 const openclawVersion = run("openclaw", ["--version"]);
-line("openclaw --version", openclawVersion.ok ? openclawVersion.stdout : `(failed: ${openclawVersion.stderr || openclawVersion.status})`);
+line(
+  "openclaw --version",
+  openclawVersion.ok
+    ? openclawVersion.stdout
+    : `(failed: ${openclawVersion.stderr || openclawVersion.status})`
+);
 
 if (!whichOpenclaw.ok && binDir) {
   process.stdout.write("\nHint:\n");
@@ -56,4 +64,3 @@ if (!whichOpenclaw.ok && binDir) {
   process.stdout.write(`- Try: export PATH="${binDir}:$PATH"\n`);
   process.stdout.write(`- Or reinstall to regenerate links: npm i -g openclaw --force\n`);
 }
-

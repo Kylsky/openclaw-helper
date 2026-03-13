@@ -195,8 +195,8 @@ function generateBaseIconRgba({ size }) {
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      const nx = (x + 0.5) / width * 2 - 1;
-      const ny = (y + 0.5) / height * 2 - 1;
+      const nx = ((x + 0.5) / width) * 2 - 1;
+      const ny = ((y + 0.5) / height) * 2 - 1;
 
       const d = sdRoundBox(nx, ny, 0.78, 0.78, 0.28);
       const mask = smoothstep(aa, -aa, d);
@@ -324,21 +324,24 @@ async function generateIcons() {
     ];
 
     for (const { name, size } of iconsetFiles) {
-      const rgba = size === baseSize
-        ? baseRgba
-        : resizeRgbaBilinear({
-            srcRgba: baseRgba,
-            srcWidth: baseSize,
-            srcHeight: baseSize,
-            dstWidth: size,
-            dstHeight: size
-          });
+      const rgba =
+        size === baseSize
+          ? baseRgba
+          : resizeRgbaBilinear({
+              srcRgba: baseRgba,
+              srcWidth: baseSize,
+              srcHeight: baseSize,
+              dstWidth: size,
+              dstHeight: size
+            });
       const png = encodePng({ width: size, height: size, rgba });
       await writeFile(path.join(iconsetDir, name), png);
     }
 
     const icnsPath = path.join(buildDir, "icon.icns");
-    execFileSync("/usr/bin/iconutil", ["-c", "icns", iconsetDir, "-o", icnsPath], { stdio: "ignore" });
+    execFileSync("/usr/bin/iconutil", ["-c", "icns", iconsetDir, "-o", icnsPath], {
+      stdio: "ignore"
+    });
 
     await fs.rm(iconsetDir, { recursive: true, force: true });
   }
@@ -347,15 +350,16 @@ async function generateIcons() {
   const icoEntries = [];
 
   for (const size of icoSizes) {
-    const rgba = size === baseSize
-      ? baseRgba
-      : resizeRgbaBilinear({
-          srcRgba: baseRgba,
-          srcWidth: baseSize,
-          srcHeight: baseSize,
-          dstWidth: size,
-          dstHeight: size
-        });
+    const rgba =
+      size === baseSize
+        ? baseRgba
+        : resizeRgbaBilinear({
+            srcRgba: baseRgba,
+            srcWidth: baseSize,
+            srcHeight: baseSize,
+            dstWidth: size,
+            dstHeight: size
+          });
     const png = encodePng({ width: size, height: size, rgba });
     icoEntries.push({ size, png });
   }

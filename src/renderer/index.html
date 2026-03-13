@@ -3,8 +3,6 @@
 
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy"
-    content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self';" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OpenClaw 助手</title>
   <link rel="stylesheet" href="./styles.css" />
@@ -12,13 +10,24 @@
 
 <body>
   <div class="app">
-    <header class="header">
-      <div class="title">OpenClaw 助手</div>
-      <div id="subtitle" class="subtitle">准备中…</div>
-    </header>
+    <!-- <header class="header">
+        <h1 class="title">OpenClaw 助手</h1>
+      </header> -->
 
     <section id="installerCard" class="card hidden">
       <h2>一键安装</h2>
+      <div class="field">
+        <div class="label">自定义 Base URL</div>
+        <input id="customBaseUrl" type="text" value="https://sub.yeelovo.com/v1" />
+      </div>
+      <div class="field">
+        <div class="label">模型 ID</div>
+        <input id="customModelId" type="text" value="gpt-5.4" />
+      </div>
+      <div class="field">
+        <div class="label">CUSTOM_API_KEY</div>
+        <input id="customApiKey" type="password" placeholder="粘贴你的 API Key（仅用于执行 openclaw onboard）" />
+      </div>
       <div class="actions">
         <button id="installBtn" type="button">开始安装</button>
         <button id="cancelBtn" class="secondary" type="button" disabled>取消</button>
@@ -27,84 +36,365 @@
 
     <section id="dashboardCard" class="card hidden">
       <h2>控制台</h2>
-      <div class="row">
-        <div id="versionPill" class="pill">version: -</div>
-        <div id="gatewayStatusPill" class="pill">网关：检测中…</div>
-        <button id="refreshBtn" class="secondary" type="button">刷新</button>
-      </div>
-      <div class="actions">
-        <button id="openDashboardBtn" type="button">打开控制台</button>
-        <button id="openWizardBtn" class="secondary" type="button">开始配置</button>
+      <div class="row" style="justify-content: space-between">
+        <div class="row">
+          <div id="versionPill" class="pill">version: -</div>
+          <div id="gatewayStatusPill" class="pill">网关：检测中…</div>
+          <button id="refreshBtn" class="icon-btn" style="
+                padding: 6px 12px;
+                font-size: 13px;
+                background: transparent;
+                border: 1px solid var(--border);
+                border-radius: 20px;
+              " type="button">
+            ↻
+          </button>
+        </div>
+        <div class="row">
+          <button id="openConfigBtn" class="secondary" type="button" style="padding: 10px 14px;">系统配置</button>
+          <button id="openDashboardBtn" type="button">进入控制台</button>
+        </div>
       </div>
       <div class="featureGrid">
         <div class="featureCard">
-          <div class="featureTitle">网关服务</div>
-          <div class="featureDesc">用于消息、助手与控制台的本地服务。若检测到未安装，将显示“安装服务”。</div>
-          <div class="featureActions">
-            <button id="gatewayInstallBtn" class="secondary hidden" type="button">安装服务</button>
-            <button id="gatewayStartBtn" type="button">启动</button>
-            <button id="gatewayStopBtn" class="secondary" type="button">停止</button>
-            <button id="gatewayStatusBtn" class="secondary" type="button">检查状态</button>
+          <div class="featureHeader">
+            <div class="featureTitle">网关服务</div>
+            <div class="featureActions">
+              <button id="gatewayRestartBtn" class="secondary" style="padding: 6px 12px; font-size: 12px" type="button">
+                重启
+              </button>
+              <button id="gatewayStopBtn" class="secondary" style="padding: 6px 12px; font-size: 12px" type="button">
+                停止
+              </button>
+              <button id="gatewayStartBtn" style="padding: 6px 12px; font-size: 12px" type="button">
+                启动
+              </button>
+            </div>
           </div>
-        </div>
-
-
-
-        <div class="featureCard">
-          <div class="featureTitle">健康检查</div>
-          <div class="featureDesc">检查配置与服务状态，并尝试自动修复常见问题。</div>
-          <div class="featureActions">
-            <button id="doctorBtn" type="button">一键修复</button>
-          </div>
+          <div class="featureDesc">后台本地服务，提供网络通讯支持。</div>
         </div>
 
         <div class="featureCard">
-          <div class="featureTitle">更新</div>
-          <div class="featureDesc">切换/更新到稳定版、测试版或开发版。</div>
-          <div class="featureForm">
-            <select id="updateChannel">
-              <option value="stable" selected>稳定版（stable）</option>
-              <option value="beta">测试版（beta）</option>
-              <option value="dev">开发版（dev）</option>
-            </select>
+          <div class="featureHeader">
+            <div class="featureTitle">健康检查</div>
+            <div class="featureActions">
+              <button id="doctorBtn" class="secondary" style="padding: 6px 12px; font-size: 12px" type="button">
+                一键修复
+              </button>
+            </div>
           </div>
-          <div class="featureActions">
-            <button id="updateBtn" type="button">更新</button>
+          <div class="featureDesc" style="margin-bottom: auto">
+            检查配置与服务状态，修复常见问题。
           </div>
         </div>
 
         <div class="featureCard">
-          <div class="featureTitle">卸载</div>
-          <div class="featureDesc">调用 openclaw 自带卸载命令：openclaw uninstall --yes。</div>
-          <div class="featureActions">
-            <button id="uninstallBtn" class="secondary" type="button">卸载 OpenClaw</button>
+          <div class="featureHeader">
+            <div class="featureTitle">检查更新</div>
+            <div class="featureActions">
+              <button id="updateBtn" class="secondary" style="padding: 6px 12px; font-size: 12px" type="button">
+                更新
+              </button>
+            </div>
+          </div>
+          <div class="featureDesc">当前选用版本频道：</div>
+          <select id="updateChannel" style="padding: 8px 12px; font-size: 13px; margin-top: auto">
+            <option value="stable" selected>稳定版（stable）</option>
+            <option value="beta">测试版（beta）</option>
+            <option value="dev">开发版（dev）</option>
+          </select>
+        </div>
+
+        <div class="featureCard">
+          <div class="featureHeader">
+            <div class="featureTitle">卸载及清理</div>
+            <div class="featureActions">
+              <button id="uninstallBtn" class="danger" style="
+                    padding: 6px 12px;
+                    font-size: 12px;
+                    background: rgba(255, 59, 48, 0.1);
+                    color: var(--danger);
+                    border: 1px solid rgba(255, 59, 48, 0.3);
+                    box-shadow: none;
+                  " type="button">
+                彻底卸载
+              </button>
+            </div>
+          </div>
+          <div class="featureDesc" style="margin-bottom: auto">
+            清理服务和命令行工具，不可逆转。
           </div>
         </div>
       </div>
     </section>
 
-    <section class="card">
-      <h2>进度</h2>
-      <div id="stageText" class="stage">等待开始…</div>
-      <div class="progress">
-        <div id="progressBar" class="progressBar" style="width: 0%"></div>
+    <section id="configCard" class="card hidden">
+      <div class="featureHeader" style="margin-bottom: 24px;">
+        <h2 style="margin: 0">配置中心</h2>
+        <div class="featureActions" style="margin-top: 0; padding-top: 0;">
+          <button id="configCancelBtn" class="secondary" style="padding: 6px 14px; font-size: 13px"
+            type="button">关闭</button>
+          <button id="configSaveBtn" style="padding: 6px 14px; font-size: 13px" type="button">保存</button>
+        </div>
       </div>
-      <div id="progressText" class="progressText">0%</div>
-      <div class="row">
-        <button id="stopBtn" class="secondary" type="button" disabled>取消当前任务</button>
-        <label class="toggle inline">
-          <input id="showLogs" type="checkbox" checked />
-          显示日志
-        </label>
+
+      <div id="configLoadingOverlay" class="configLoadingOverlay hidden" aria-live="polite" aria-busy="true">
+        <div class="configLoadingPanel">
+          <div class="configLoadingSpinner" aria-hidden="true"></div>
+          <div id="configLoadingTitle" class="configLoadingTitle">正在加载配置中心…</div>
+          <div id="configLoadingHint" class="configLoadingHint">正在读取 OpenClaw 配置与 Workspace Markdown…</div>
+        </div>
       </div>
+
+      <div id="configContent" class="configContent">
+        <!-- <div class="hint" style="margin-bottom: 16px;">
+          配置会基于“默认模型”的 `provider/model` 自动定位 Provider。密钥类字段默认不回显，留空表示保持原值。
+        </div> -->
+
+        <div class="configScroll">
+          <div class="configGroup">
+            <h3 class="configGroupTitle">模型配置</h3>
+            <div class="fieldGrid">
+              <div class="field">
+                <div class="label">全局默认模型 (Provider / Model ID)</div>
+                <input id="cfgDefaultModel" type="text" list="cfgDefaultModelPresets"
+                  placeholder="例如: custom-provider/gpt-5.4" />
+              </div>
+              <div class="field">
+                <div class="label">Provider ID（自动推断）</div>
+                <input id="cfgProviderId" type="text" placeholder="将根据默认模型自动解析" readonly />
+              </div>
+              <div class="field">
+                <div class="label">Provider API 模式</div>
+                <select id="cfgProviderApi">
+                  <option value="">请选择</option>
+                  <option value="openai-responses">openai-responses</option>
+                  <option value="openai-completions">openai-completions</option>
+                  <option value="openai-codex-responses">openai-codex-responses</option>
+                  <option value="anthropic-messages">anthropic-messages</option>
+                  <option value="google-generative-ai">google-generative-ai</option>
+                  <option value="github-copilot">github-copilot</option>
+                  <option value="bedrock-converse-stream">bedrock-converse-stream</option>
+                  <option value="ollama">ollama</option>
+                </select>
+              </div>
+              <div class="field">
+                <div class="label">Base URL</div>
+                <input id="cfgBaseUrl" type="text" list="cfgBaseUrlPresets"
+                  placeholder="例如: https://api.openai.com/v1" />
+              </div>
+              <div class="field fieldSpan2">
+                <div class="label">API Key</div>
+                <input id="cfgApiKey" type="password" placeholder="留空表示保持原值；输入后覆盖已有值" autocomplete="new-password" />
+                <div class="hint">出于安全原因，已保存的 API Key 不会在这里回显。</div>
+              </div>
+              <div class="field">
+                <div class="label">Context Window</div>
+                <input id="cfgContextWindow" type="number" min="1" step="1" placeholder="例如: 320000" />
+              </div>
+              <div class="field">
+                <div class="label">Max Tokens</div>
+                <input id="cfgMaxTokens" type="number" min="1" step="1" placeholder="例如: 81920" />
+              </div>
+            </div>
+          </div>
+
+          <div class="configGroup">
+            <h3 class="configGroupTitle">Agent 默认配置</h3>
+            <div class="fieldGrid">
+              <div class="field fieldSpan2">
+                <div class="label">默认工作目录</div>
+                <input id="cfgWorkspace" type="text" list="cfgWorkspacePresets"
+                  placeholder="例如: ~/.openclaw/workspace" />
+              </div>
+              <div class="field">
+                <div class="label">最大并发</div>
+                <input id="cfgMaxConcurrent" type="number" min="1" step="1" placeholder="例如: 4" />
+              </div>
+              <div class="field">
+                <div class="label">子代理最大并发</div>
+                <input id="cfgSubagentsMaxConcurrent" type="number" min="1" step="1" placeholder="例如: 8" />
+              </div>
+              <div class="field">
+                <div class="label">压缩模式</div>
+                <select id="cfgCompactionMode">
+                  <option value="">请选择</option>
+                  <option value="safeguard">safeguard（推荐）</option>
+                  <option value="default">default</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="configGroup">
+            <h3 class="configGroupTitle">网关配置</h3>
+            <div class="fieldGrid">
+              <div class="field">
+                <div class="label">网关模式</div>
+                <select id="cfgGatewayMode">
+                  <option value="">请选择</option>
+                  <option value="local">local（本机运行）</option>
+                  <option value="remote">remote（连接远端网关）</option>
+                </select>
+                <div class="hint">切到 remote 通常还需要额外配置 `gateway.remote.*`。</div>
+              </div>
+              <div class="field">
+                <div class="label">监听地址</div>
+                <select id="cfgGatewayBind">
+                  <option value="">请选择</option>
+                  <option value="loopback">loopback（仅本机）</option>
+                  <option value="lan">lan（局域网）</option>
+                  <option value="tailnet">tailnet（Tailscale IP）</option>
+                  <option value="auto">auto（自动）</option>
+                  <option value="custom">custom（自定义地址）</option>
+                </select>
+              </div>
+              <div class="field">
+                <div class="label">端口</div>
+                <input id="cfgGatewayPort" type="number" min="1" max="65535" step="1" placeholder="例如: 18789" />
+              </div>
+              <div class="field">
+                <div class="label">鉴权模式</div>
+                <select id="cfgGatewayAuthMode">
+                  <option value="">请选择</option>
+                  <option value="token">token（推荐）</option>
+                  <option value="password">password</option>
+                  <option value="none">none（不鉴权）</option>
+                  <option value="trusted-proxy">trusted-proxy（需反代配套）</option>
+                </select>
+              </div>
+              <div id="cfgGatewayCustomBindHostField" class="field fieldSpan2 hidden">
+                <div class="label">自定义监听 Host</div>
+                <input id="cfgGatewayCustomBindHost" type="text" list="cfgGatewayCustomBindHostPresets"
+                  placeholder="例如: 127.0.0.1 或 0.0.0.0" />
+                <div class="hint">仅当监听地址选择 `custom` 时生效。</div>
+              </div>
+              <div id="cfgGatewayAuthTokenField" class="field fieldSpan2">
+                <div class="label">鉴权令牌</div>
+                <input id="cfgGatewayAuthToken" type="password" placeholder="留空表示保持原值；输入后覆盖已有值"
+                  autocomplete="new-password" />
+                <div class="hint">只有在轮换网关令牌或首次设置时才需要填写。</div>
+              </div>
+              <div id="cfgGatewayAuthPasswordField" class="field fieldSpan2 hidden">
+                <div class="label">鉴权密码</div>
+                <input id="cfgGatewayAuthPassword" type="password" placeholder="留空表示保持原值；输入后覆盖已有值"
+                  autocomplete="new-password" />
+                <div class="hint">仅当鉴权模式选择 `password` 时需要填写。</div>
+              </div>
+              <div id="cfgGatewayTrustedProxiesField" class="field fieldSpan2 hidden">
+                <div class="label">可信代理 IP / CIDR</div>
+                <textarea id="cfgGatewayTrustedProxies" rows="3" placeholder="每行一个，例如：&#10;127.0.0.1&#10;10.0.0.1/32"></textarea>
+                <div class="hint">对应 `gateway.trustedProxies`。支持换行或逗号分隔；仅填写你信任的反向代理地址。</div>
+              </div>
+              <div id="cfgGatewayTrustedProxyUserHeaderField" class="field hidden">
+                <div class="label">用户身份 Header</div>
+                <input id="cfgGatewayTrustedProxyUserHeader" type="text" list="cfgGatewayTrustedProxyUserHeaderPresets" placeholder="例如: x-forwarded-user" />
+                <div class="hint">对应 `gateway.auth.trustedProxy.userHeader`，用于传递已认证用户身份。</div>
+              </div>
+              <div id="cfgGatewayTrustedProxyRequiredHeadersField" class="field hidden">
+                <div class="label">必需 Header</div>
+                <textarea id="cfgGatewayTrustedProxyRequiredHeaders" rows="3" placeholder="每行一个，例如：&#10;x-forwarded-proto&#10;x-forwarded-host"></textarea>
+                <div class="hint">对应 `gateway.auth.trustedProxy.requiredHeaders`。这些 Header 缺失时请求不会被信任。</div>
+              </div>
+              <div id="cfgGatewayTrustedProxyAllowUsersField" class="field fieldSpan2 hidden">
+                <div class="label">允许用户列表</div>
+                <textarea id="cfgGatewayTrustedProxyAllowUsers" rows="3" placeholder="每行一个，例如：&#10;admin@example.com&#10;ops@example.com"></textarea>
+                <div class="hint">对应 `gateway.auth.trustedProxy.allowUsers`。留空表示允许所有已认证用户。</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="configGroup">
+            <h3 class="configGroupTitle">Workspace Markdown</h3>
+            <div class="hint" style="margin-bottom: 12px;">
+              这里可以直接修改 workspace 根目录下的提示词与上下文 Markdown，例如 `SOUL.md`、`USER.md`、`AGENTS.md` 等。保存时会自动创建缺失文件。
+            </div>
+            <div class="markdownEditorToolbar">
+              <button id="workspaceMarkdownExpandBtn" class="secondary" type="button">展开全部</button>
+              <button id="workspaceMarkdownCollapseBtn" class="secondary" type="button">收起全部</button>
+            </div>
+            <div id="workspaceMarkdownList" class="markdownEditorList"></div>
+          </div>
+        </div>
+      </div>
+
+      <datalist id="cfgDefaultModelPresets"></datalist>
+      <datalist id="cfgBaseUrlPresets">
+        <option value="https://api.openai.com/v1"></option>
+        <option value="https://openrouter.ai/api/v1"></option>
+        <option value="http://127.0.0.1:11434/v1"></option>
+        <option value="http://localhost:11434/v1"></option>
+      </datalist>
+      <datalist id="cfgWorkspacePresets">
+        <option value="~/.openclaw/workspace"></option>
+        <option value="$HOME/.openclaw/workspace"></option>
+        <option value="~/Documents/openclaw-workspace"></option>
+      </datalist>
+      <datalist id="cfgGatewayCustomBindHostPresets">
+        <option value="127.0.0.1"></option>
+        <option value="0.0.0.0"></option>
+        <option value="::1"></option>
+      </datalist>
+      <datalist id="cfgGatewayTrustedProxyUserHeaderPresets">
+        <option value="x-forwarded-user"></option>
+        <option value="x-pomerium-claim-email"></option>
+        <option value="x-auth-request-email"></option>
+      </datalist>
     </section>
 
-    <section id="logCard" class="card hidden">
-      <h2>日志</h2>
-      <pre id="log" class="log"></pre>
-    </section>
   </div>
 
+  <div id="operationOverlay" class="modalOverlay hidden" role="dialog" aria-modal="true"
+    aria-labelledby="operationTitle">
+    <div class="modal operationModal">
+      <div class="operationModalHeader">
+        <div id="operationTitle" class="modalTitle operationModalTitle">执行详情</div>
+        <button id="operationCloseBtn" class="secondary operationCloseBtn" type="button" aria-label="关闭执行详情">
+          关闭
+        </button>
+      </div>
+      <div class="operationModalContent">
+        <section class="operationSection">
+          <div class="row progressRow operationProgressHeader">
+            <h2 style="margin: 0">进度</h2>
+            <label class="toggle inline" style="margin-left: auto">
+              <input id="showLogs" type="checkbox" checked />
+              显示日志
+            </label>
+          </div>
+          <div id="stageText" class="stage" style="margin-top: 12px">等待开始…</div>
+          <div class="progress">
+            <div id="progressBar" class="progressBar" style="width: 0%"></div>
+          </div>
+          <div class="row progressRow" style="margin-top: 8px">
+            <div id="progressText" class="progressText" style="margin: 0">0%</div>
+            <button id="stopBtn" class="secondary" style="padding: 6px 14px; font-size: 13px" type="button" disabled>
+              取消当前任务
+            </button>
+          </div>
+        </section>
+
+        <section id="logCard" class="operationSection hidden">
+          <h2 style="margin-top: 0">日志</h2>
+          <div id="log" class="log logHtml" role="log" aria-live="polite"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div id="modalOverlay" class="modalOverlay hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal">
+      <div id="modalTitle" class="modalTitle">确认</div>
+      <div id="modalBody" class="modalBody"></div>
+      <div class="modalActions">
+        <button id="modalCancelBtn" class="secondary" type="button">取消</button>
+        <button id="modalConfirmBtn" type="button">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./boot.js"></script>
+  <script src="./installer.js"></script>
   <script src="./renderer.js"></script>
 </body>
 

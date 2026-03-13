@@ -1,6 +1,6 @@
 module.exports = [
   {
-    ignores: ["node_modules/**", "release/**", "dist/**"]
+    ignores: ["node_modules/**", "release/**", "dist/**", "src-tauri/target/**", "src-tauri/gen/**"]
   },
   {
     files: ["src/**/*.js"],
@@ -34,4 +34,3 @@ module.exports = [
     }
   }
 ];
-
