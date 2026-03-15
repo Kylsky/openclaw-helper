@@ -104,6 +104,7 @@ async function taskkillWindowsTreeBestEffort({ pid, env, signal, onLog }) {
   }
 }
 
+function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
