@@ -76,6 +76,7 @@ const doctorBtn = el("doctorBtn");
 const updateBtn = el("updateBtn");
 const updateChannel = el("updateChannel");
 const uninstallBtn = el("uninstallBtn");
+const weixinConfigBtn = el("weixinConfigBtn");
 
 const operationOverlay = el("operationOverlay");
 const operationTitle = el("operationTitle");
@@ -98,6 +99,11 @@ let loadedWorkspaceMarkdowns = [];
 let workspaceMarkdownEditors = new Map();
 let expandedWorkspaceMarkdownNames = null;
 let configLoadToken = 0;
+let taskRecoveredFromBackend = false;
+let taskCancelRequested = false;
+let taskStatusSyncPromise = null;
+let taskStatusPollTimer = null;
+let activeTaskMeta = null;
 
 function normalizeUserFacingTerms(text) {
   return String(text ?? "")
@@ -219,8 +225,9 @@ function humanizeErrorMessage(message) {
 }
 
 function humanizeLogLine(line) {
-  const raw = String(line ?? "").trim();
-  if (!raw) return "";
+  const original = String(line ?? "");
+  const raw = original.trim();
+  if (!raw) return original;
 
   let match = raw.match(/^\[错误\]\s*(.+)$/);
   if (match) return `出错了：${humanizeErrorMessage(match[1])}`;
@@ -389,7 +396,7 @@ function humanizeLogLine(line) {
     return label ? `${label}${detail}` : detail;
   }
 
-  return normalizeUserFacingTerms(raw);
+  return normalizeUserFacingTerms(original);
 }
 
 function classifyLogLine(rawText, displayText) {
@@ -435,9 +442,11 @@ function confirmModal({ title, body, confirmText = "确定", cancelText = "取�
     modalConfirmBtn.textContent = String(confirmText ?? "确定");
 
     modalOverlay.classList.remove("hidden");
+    syncModalBodyState();
 
     const cleanup = () => {
       modalOverlay.classList.add("hidden");
+      syncModalBodyState();
       modalCancelBtn.removeEventListener("click", onCancel);
       modalConfirmBtn.removeEventListener("click", onConfirm);
       window.removeEventListener("keydown", onKeydown);
@@ -480,7 +489,29 @@ function isOperationModalOpen() {
   return Boolean(operationOverlay && !operationOverlay.classList.contains("hidden"));
 }
 
+function syncModalBodyState() {
+  const confirmOpen = Boolean(modalOverlay && !modalOverlay.classList.contains("hidden"));
+  const operationOpen = Boolean(operationOverlay && !operationOverlay.classList.contains("hidden"));
+  document.body.classList.toggle("modalOpen", confirmOpen || operationOpen);
+}
+
 function updateOperationModalAvailability() {
+  const canCancel = Boolean(taskRunning && (activeTaskMeta?.canCancel ?? true));
+  const cancelWarning =
+    taskRunning && activeTaskMeta?.canCancel === false
+      ? activeTaskMeta.cancelWarning || "当前任务进行中，暂不支持取消。"
+      : "";
+
+  if (cancelBtn) {
+    cancelBtn.disabled = !canCancel;
+    cancelBtn.title = canCancel ? "" : cancelWarning;
+  }
+
+  if (stopBtn) {
+    stopBtn.disabled = !canCancel;
+    stopBtn.title = canCancel ? "" : cancelWarning;
+  }
+
   if (!operationCloseBtn) return;
   operationCloseBtn.disabled = taskRunning;
   operationCloseBtn.title = taskRunning ? "任务执行中，暂不可关闭" : "";
@@ -490,6 +521,7 @@ function showOperationModal(title = "执行详情") {
   if (!operationOverlay || !operationTitle) return;
   operationTitle.textContent = humanizeStageText(title ?? "执行详情");
   operationOverlay.classList.remove("hidden");
+  syncModalBodyState();
   updateOperationModalAvailability();
   updateLogVisibility();
 }
@@ -497,6 +529,7 @@ function showOperationModal(title = "执行详情") {
 function hideOperationModal() {
   if (!operationOverlay || taskRunning) return;
   operationOverlay.classList.add("hidden");
+  syncModalBodyState();
 }
 
 function setConfigLoading(value, { title, hint } = {}) {
@@ -582,6 +615,68 @@ function isMissingOpenclawError(error) {
   return /未检测到 openclaw/i.test(message) || /ENOENT/i.test(message);
 }
 
+function isTaskAlreadyRunningError(error) {
+  const message = normalizeUserFacingTerms(error?.message || error || "").trim();
+  return message === "已有任务正在运行，请先取消或等待完成。";
+}
+
+function isTaskCanceledError(error) {
+  const message = normalizeUserFacingTerms(error?.message || error || "").trim();
+  return message === "用户取消";
+}
+
+function isTaskCancelBlockedError(error) {
+  const message = normalizeUserFacingTerms(error?.message || error || "").trim();
+  return /暂不支持取消/.test(message);
+}
+
+function normalizeTaskMeta(meta) {
+  return {
+    kind: String(meta?.kind || "generic"),
+    title: String(meta?.title || meta?.stageLabel || "执行中…"),
+    canCancel: meta?.canCancel !== false,
+    cancelWarning: meta?.cancelWarning ? String(meta.cancelWarning) : ""
+  };
+}
+
+function taskMetaFromStatus(status, fallbackTitle = "执行中…") {
+  return normalizeTaskMeta({
+    kind: status?.kind,
+    title: status?.title || fallbackTitle,
+    canCancel: status?.canCancel,
+    cancelWarning: status?.cancelWarning
+  });
+}
+
+function setActiveTaskMeta(meta) {
+  activeTaskMeta = meta ? normalizeTaskMeta(meta) : null;
+  updateOperationModalAvailability();
+}
+
+function clearActiveTaskMeta() {
+  activeTaskMeta = null;
+  updateOperationModalAvailability();
+}
+
+function applyCanceledTaskOutcome(taskMeta, isInstalled) {
+  const kind = String(taskMeta?.kind || "").trim();
+
+  if (kind === "update") {
+    if (isInstalled) {
+      appendLog("[ui] 更新已取消，当前仍可继续使用 OpenClaw。");
+      setStage("已取消");
+      return;
+    }
+
+    appendLog("[warn] 更新已中断，当前未检测到 OpenClaw。更新可能停在替换阶段，请重新安装或再次执行更新。");
+    setStage("需要重新安装");
+    return;
+  }
+
+  appendLog("[ui] 当前任务已取消。");
+  setStage("已取消");
+}
+
 async function rerouteIfOpenclawMissing(error) {
   if (!isMissingOpenclawError(error)) return false;
   try {
@@ -590,6 +685,122 @@ async function rerouteIfOpenclawMissing(error) {
     // ignore
   }
   return true;
+}
+
+function stopRecoveredTaskPolling() {
+  if (taskStatusPollTimer != null) {
+    window.clearInterval(taskStatusPollTimer);
+    taskStatusPollTimer = null;
+  }
+}
+
+function ensureRecoveredTaskPolling() {
+  if (taskStatusPollTimer != null) return;
+  taskStatusPollTimer = window.setInterval(() => {
+    void syncRecoveredTaskState({ silentErrors: true });
+  }, 1200);
+}
+
+async function syncRecoveredTaskState({
+  showModal = false,
+  logRecovery = false,
+  modalTitle = "执行中…",
+  silentErrors = false
+} = {}) {
+  if (taskStatusSyncPromise) return await taskStatusSyncPromise;
+
+  taskStatusSyncPromise = (async () => {
+    const status = await installer.getTaskStatus();
+    const running = Boolean(status?.running);
+    const cancelRequested = Boolean(status?.cancelRequested);
+
+    if (running) {
+      const wasRecovered = taskRecoveredFromBackend;
+      const nextTaskMeta = taskMetaFromStatus(status, modalTitle);
+      taskRecoveredFromBackend = true;
+      taskCancelRequested = cancelRequested;
+      setActiveTaskMeta(nextTaskMeta);
+      setTaskRunning(true);
+      showLogsCheckbox.checked = true;
+      updateLogVisibility();
+
+      const nextModalTitle = cancelRequested ? "取消当前任务…" : nextTaskMeta.title;
+      if (showModal || !isOperationModalOpen()) {
+        showOperationModal(nextModalTitle);
+      } else if (operationTitle) {
+        operationTitle.textContent = humanizeStageText(nextModalTitle);
+      }
+
+      if (cancelRequested) {
+        setStage("取消中…");
+      } else if (
+        !wasRecovered ||
+        ["等待开始…", "等待开始", "就绪", "完成", "失败"].includes(String(stageText?.textContent || "").trim())
+      ) {
+        setStage(nextTaskMeta.title);
+      }
+
+      if (progressText && ["0%", "100%"].includes(String(progressText.textContent || "").trim())) {
+        setProgress(0.05);
+      }
+
+      ensureRecoveredTaskPolling();
+      if (logRecovery) {
+        if (nextTaskMeta.canCancel) {
+          appendLog(`[ui] 检测到后台仍在执行：${nextTaskMeta.title}，已重新连接当前任务。`);
+        } else {
+          appendLog(
+            `[ui] 检测到后台仍在执行：${nextTaskMeta.title}。${nextTaskMeta.cancelWarning || "当前步骤暂不支持取消，请等待完成。"}`
+          );
+        }
+      }
+      return status;
+    }
+
+    if (taskRecoveredFromBackend) {
+      const finishedTaskMeta = activeTaskMeta ? { ...activeTaskMeta } : null;
+      const canceled = taskCancelRequested;
+      taskRecoveredFromBackend = false;
+      stopRecoveredTaskPolling();
+      taskCancelRequested = false;
+      setTaskRunning(false);
+      clearActiveTaskMeta();
+      appendLog("[ui] 检测到后台任务已结束，正在刷新当前状态…");
+      const isInstalled = await checkAndRoute();
+      if (canceled) {
+        applyCanceledTaskOutcome(finishedTaskMeta, isInstalled);
+      }
+    }
+
+    return status;
+  })();
+
+  try {
+    return await taskStatusSyncPromise;
+  } catch (error) {
+    if (!silentErrors) {
+      appendLog(`[错误] 同步任务状态失败：${error?.message || String(error)}`);
+    }
+    return null;
+  } finally {
+    taskStatusSyncPromise = null;
+  }
+}
+
+async function recoverTaskControlsFromBackend(error, { modalTitle = "执行中…" } = {}) {
+  if (!isTaskAlreadyRunningError(error)) return false;
+
+  const status = await syncRecoveredTaskState({
+    showModal: true,
+    logRecovery: true,
+    modalTitle
+  });
+
+  if (!status?.running) {
+    appendLog("[ui] 后台任务似乎已经结束了，请稍后重试当前操作。");
+  }
+
+  return Boolean(status?.running);
 }
 
 function setStage(text) {
@@ -1212,15 +1423,15 @@ function queueStringArrayConfigSet(seq, { label, path, rawValue, currentValue = 
 
 function setTaskRunning(value) {
   taskRunning = value;
+  if (!value) taskCancelRequested = false;
   installBtn.disabled = value;
-  cancelBtn.disabled = !value;
-  stopBtn.disabled = !value;
   updateOperationModalAvailability();
 
   applyGatewayActionAvailability();
   doctorBtn.disabled = value;
   updateBtn.disabled = value;
   if (uninstallBtn) uninstallBtn.disabled = value;
+  if (weixinConfigBtn) weixinConfigBtn.disabled = value;
   if (configSaveBtn) configSaveBtn.disabled = value;
   if (configCancelBtn) configCancelBtn.disabled = value;
   if (openConfigBtn) openConfigBtn.disabled = value;
@@ -1431,11 +1642,27 @@ async function checkAndRoute() {
 
 async function runOpenclaw(args, { stageLabel }) {
   if (taskRunning) return;
-  showOperationModal(stageLabel || "执行中…");
+  const taskMeta =
+    Array.isArray(args) && args[0] === "update"
+      ? normalizeTaskMeta({
+          kind: "update",
+          title: "更新 OpenClaw…",
+          canCancel: false,
+          cancelWarning: "更新进行中，暂不支持取消。中断更新可能导致 OpenClaw 暂时不可用，请等待完成。"
+        })
+      : normalizeTaskMeta({ title: stageLabel || "执行中…" });
+
+  setActiveTaskMeta(taskMeta);
+  showOperationModal(taskMeta.title);
   setTaskRunning(true);
   logEl.textContent = "";
-  setStage(stageLabel || "执行中…");
+  if (!taskMeta.canCancel && taskMeta.cancelWarning) {
+    appendLog(`[ui] ${taskMeta.cancelWarning}`);
+  }
+  setStage(stageLabel || taskMeta.title);
   setProgress(0.05);
+  let recoveredExternalTask = false;
+  let canceled = false;
 
   try {
     await installer.runOpenclaw(args);
@@ -1443,14 +1670,30 @@ async function runOpenclaw(args, { stageLabel }) {
     setProgress(1);
   } catch (error) {
     const message = error?.message || String(error);
-    setStage("失败");
-    appendLog(`[错误] ${message}`);
+    canceled = isTaskCanceledError(error);
+    if (canceled) {
+      setStage("已取消");
+    } else {
+      setStage("失败");
+      appendLog(`[错误] ${message}`);
+    }
     showLogsCheckbox.checked = true;
     updateLogVisibility();
-    await rerouteIfOpenclawMissing(error);
+    if (!canceled) {
+      recoveredExternalTask = await recoverTaskControlsFromBackend(error, {
+        modalTitle: taskMeta.title
+      });
+      await rerouteIfOpenclawMissing(error);
+    }
   } finally {
-    setTaskRunning(false);
-    await checkAndRoute();
+    if (!recoveredExternalTask) {
+      setTaskRunning(false);
+      clearActiveTaskMeta();
+      const isInstalled = await checkAndRoute();
+      if (canceled) {
+        applyCanceledTaskOutcome(taskMeta, isInstalled);
+      }
+    }
   }
 }
 
@@ -1459,11 +1702,15 @@ async function runOpenclawSequence(steps, { stageLabel }) {
   const list = Array.isArray(steps) ? steps.filter(Boolean) : [];
   if (list.length === 0) return false;
 
-  showOperationModal(stageLabel || "执行中…");
+  const taskMeta = normalizeTaskMeta({ kind: "sequence", title: stageLabel || "执行中…" });
+  setActiveTaskMeta(taskMeta);
+  showOperationModal(taskMeta.title);
   setTaskRunning(true);
   logEl.textContent = "";
-  setStage(stageLabel || "执行中…");
+  setStage(stageLabel || taskMeta.title);
   setProgress(0.05);
+  let recoveredExternalTask = false;
+  let canceled = false;
 
   try {
     for (let i = 0; i < list.length; i += 1) {
@@ -1480,15 +1727,31 @@ async function runOpenclawSequence(steps, { stageLabel }) {
     return true;
   } catch (error) {
     const message = error?.message || String(error);
-    setStage("失败");
-    appendLog(`[错误] ${message}`);
+    canceled = isTaskCanceledError(error);
+    if (canceled) {
+      setStage("已取消");
+    } else {
+      setStage("失败");
+      appendLog(`[错误] ${message}`);
+    }
     showLogsCheckbox.checked = true;
     updateLogVisibility();
-    await rerouteIfOpenclawMissing(error);
+    if (!canceled) {
+      recoveredExternalTask = await recoverTaskControlsFromBackend(error, {
+        modalTitle: taskMeta.title
+      });
+      await rerouteIfOpenclawMissing(error);
+    }
     return false;
   } finally {
-    setTaskRunning(false);
-    await checkAndRoute();
+    if (!recoveredExternalTask) {
+      setTaskRunning(false);
+      clearActiveTaskMeta();
+      const isInstalled = await checkAndRoute();
+      if (canceled) {
+        applyCanceledTaskOutcome(taskMeta, isInstalled);
+      }
+    }
   }
 }
 
@@ -1548,7 +1811,29 @@ if (workspaceMarkdownCollapseBtn) {
 }
 
 const requestCancelTask = async () => {
-  if (!taskRunning) return;
+  if (!taskRunning) {
+    const status = await syncRecoveredTaskState({
+      showModal: true,
+      modalTitle: "执行中…",
+      silentErrors: true
+    });
+    if (!status?.running) return;
+  }
+  if (activeTaskMeta?.canCancel === false) {
+    showOperationModal(activeTaskMeta.title || "执行中…");
+    showLogsCheckbox.checked = true;
+    updateLogVisibility();
+    if (activeTaskMeta.cancelWarning) {
+      appendLog(`[ui] ${activeTaskMeta.cancelWarning}`);
+    }
+    return;
+  }
+  if (taskCancelRequested) {
+    showOperationModal("取消当前任务…");
+    setStage("取消中…");
+    return;
+  }
+  taskCancelRequested = true;
   showOperationModal("取消当前任务…");
   showLogsCheckbox.checked = true;
   updateLogVisibility();
@@ -1556,8 +1841,20 @@ const requestCancelTask = async () => {
   setStage("取消中…");
   try {
     await installer.cancelTask();
+    if (taskRecoveredFromBackend) {
+      await syncRecoveredTaskState({
+        showModal: true,
+        modalTitle: "取消当前任务…",
+        silentErrors: true
+      });
+    }
   } catch (error) {
-    appendLog(`[错误] 取消失败：${error?.message || String(error)}`);
+    taskCancelRequested = false;
+    if (isTaskCancelBlockedError(error)) {
+      appendLog(`[ui] ${error?.message || String(error)}`);
+    } else {
+      appendLog(`[错误] 取消失败：${error?.message || String(error)}`);
+    }
   }
 };
 
@@ -1571,11 +1868,15 @@ cancelBtn.addEventListener("click", async () => {
 installBtn.addEventListener("click", async () => {
   await withButtonLoading(installBtn, async () => {
     if (taskRunning) return;
-    showOperationModal("安装 OpenClaw…");
+    const taskMeta = normalizeTaskMeta({ kind: "install", title: "安装 OpenClaw…" });
+    setActiveTaskMeta(taskMeta);
+    showOperationModal(taskMeta.title);
     setTaskRunning(true);
     logEl.textContent = "";
     setStage("安装中…");
     setProgress(0);
+    let recoveredExternalTask = false;
+    let canceled = false;
 
     try {
       const customBaseUrl = customBaseUrlInput?.value ? String(customBaseUrlInput.value).trim() : "";
@@ -1593,13 +1894,29 @@ installBtn.addEventListener("click", async () => {
       // 因此这里不再自动打开交互式向导终端窗口。
     } catch (error) {
       const message = error?.message || String(error);
-      setStage("失败");
-      appendLog(`[错误] ${message}`);
+      canceled = isTaskCanceledError(error);
+      if (canceled) {
+        setStage("已取消");
+      } else {
+        setStage("失败");
+        appendLog(`[错误] ${message}`);
+      }
       showLogsCheckbox.checked = true;
       updateLogVisibility();
+      if (!canceled) {
+        recoveredExternalTask = await recoverTaskControlsFromBackend(error, {
+          modalTitle: taskMeta.title
+        });
+      }
     } finally {
-      setTaskRunning(false);
-      await checkAndRoute();
+      if (!recoveredExternalTask) {
+        setTaskRunning(false);
+        clearActiveTaskMeta();
+        const isInstalled = await checkAndRoute();
+        if (canceled) {
+          applyCanceledTaskOutcome(taskMeta, isInstalled);
+        }
+      }
     }
   });
 });
@@ -2076,14 +2393,23 @@ if (uninstallBtn) {
         return;
       }
 
-      showOperationModal("卸载 OpenClaw…");
+      const taskMeta = normalizeTaskMeta({
+        kind: "uninstall",
+        title: "卸载 OpenClaw…",
+        canCancel: false,
+        cancelWarning: "卸载进行中，暂不支持取消，以免系统状态停在半清理状态。请等待完成。"
+      });
+      setActiveTaskMeta(taskMeta);
+      showOperationModal(taskMeta.title);
       setTaskRunning(true);
       logEl.textContent = "";
       appendLog("[ui] 开始卸载…");
+      appendLog(`[ui] ${taskMeta.cancelWarning}`);
       setStage("卸载中…");
       setProgress(0.05);
 
       let routed = false;
+      let recoveredExternalTask = false;
       try {
         await installer.uninstallOpenclaw();
         setStage("检测 openclaw 命令是否仍存在…");
@@ -2099,9 +2425,56 @@ if (uninstallBtn) {
         appendLog(`[错误] ${error?.message || String(error)}`);
         showLogsCheckbox.checked = true;
         updateLogVisibility();
+        recoveredExternalTask = await recoverTaskControlsFromBackend(error, {
+          modalTitle: taskMeta.title
+        });
       } finally {
-        setTaskRunning(false);
-        if (!routed) await checkAndRoute();
+        if (!recoveredExternalTask) {
+          setTaskRunning(false);
+          clearActiveTaskMeta();
+          if (!routed) await checkAndRoute();
+        }
+      }
+    });
+  });
+}
+
+if (weixinConfigBtn) {
+  weixinConfigBtn.addEventListener("click", async () => {
+    await withButtonLoading(weixinConfigBtn, async () => {
+      if (taskRunning) return;
+      const taskMeta = normalizeTaskMeta({ kind: "weixin", title: "配置微信接入…" });
+      setActiveTaskMeta(taskMeta);
+      showLogsCheckbox.checked = true;
+      updateLogVisibility();
+      appendLog("[ui] 点击配置微信");
+      
+      showOperationModal(taskMeta.title);
+      setTaskRunning(true);
+      logEl.textContent = "";
+      appendLog("[ui] 开始配置微信…");
+      appendLog("[ui] 提示：如果二维码显示不完整，请拉宽本窗口并展开日志区以查看完整二维码。");
+      setStage("配置中…");
+      setProgress(0.05);
+      let recoveredExternalTask = false;
+
+      try {
+        await installer.runWeixinConfig();
+        setStage("完成");
+        setProgress(1);
+      } catch (error) {
+        setStage("失败");
+        appendLog(`[错误] ${error?.message || String(error)}`);
+        showLogsCheckbox.checked = true;
+        updateLogVisibility();
+        recoveredExternalTask = await recoverTaskControlsFromBackend(error, {
+          modalTitle: taskMeta.title
+        });
+      } finally {
+        if (!recoveredExternalTask) {
+          setTaskRunning(false);
+          clearActiveTaskMeta();
+        }
       }
     });
   });
@@ -2149,6 +2522,17 @@ installer.onOpenclawLog((payload) => {
   appendLog(payload.message);
 });
 
+async function initializeApp() {
+  setTaskRunning(false);
+  clearActiveTaskMeta();
+  await checkAndRoute();
+  await syncRecoveredTaskState({
+    showModal: true,
+    logRecovery: true,
+    modalTitle: "执行中…",
+    silentErrors: true
+  });
+}
+
 updateLogVisibility();
-setTaskRunning(false);
-void checkAndRoute();
+void initializeApp();

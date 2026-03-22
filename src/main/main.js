@@ -29,7 +29,10 @@ function createWindow() {
     }
   });
 
-  mainWindow.once("ready-to-show", () => mainWindow.show());
+  mainWindow.once("ready-to-show", () => {
+    mainWindow.maximize();
+    mainWindow.show();
+  });
 
   const indexHtmlPath = path.join(__dirname, "..", "renderer", "index.html");
   void mainWindow.loadFile(indexHtmlPath);

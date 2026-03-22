@@ -26,7 +26,9 @@ pub fn run() {
             commands::uninstall_openclaw,
             commands::start_install,
             commands::cancel_task,
+            commands::get_task_status,
             commands::exec_openclaw_collect,
+            commands::run_weixin_config,
             commands::load_config_center_data,
             commands::load_workspace_markdowns,
             commands::save_workspace_markdown
