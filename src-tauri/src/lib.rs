@@ -20,6 +20,7 @@ pub fn run() {
             commands::check_openclaw,
             commands::get_gateway_status,
             commands::run_openclaw,
+            commands::update_openclaw,
             commands::open_dashboard,
             commands::open_wizard,
             commands::open_external,

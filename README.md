@@ -9,6 +9,7 @@
 - macOS：优先复用系统已有 `node/npm`；如检测不到或版本过低且已安装 Homebrew，则通过 `brew install/upgrade node` 自动修复
 - 安装 `Git`（优先复用；macOS 无 Homebrew 时会尝试触发 Xcode Command Line Tools 安装）
 - 环境校验（node/npm/git 版本检测，`openclaw` 需要 Node.js >= 22）
+- 安装/更新涉及 `npm` / `pnpm` 全局包操作时，默认使用国内源 `https://registry.npmmirror.com`
 - 执行 `npm install -g openclaw`，并在命令链接缺失时自动 `--force` 修复，避免“装了但找不到命令”
 
 > 说明：macOS 若未安装 Homebrew 且本机也没有满足要求的 Node.js，会提示你先用官方安装器或版本管理器（Volta/fnm/nvm）安装 Node.js 后再重试。

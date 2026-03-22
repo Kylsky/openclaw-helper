@@ -44,6 +44,10 @@ window.installer = {
     const finalArgs = Array.isArray(args) ? args.map((x) => String(x)) : [];
     return await invoke("run_openclaw", { args: finalArgs });
   },
+  updateOpenclaw: async (channel) => {
+    const { invoke } = assertTauri();
+    return await invoke("update_openclaw", { channel: String(channel || "stable") });
+  },
   execOpenclawCollect: async (args) => {
     const { invoke } = assertTauri();
     const finalArgs = Array.isArray(args) ? args.map((x) => String(x)) : [];

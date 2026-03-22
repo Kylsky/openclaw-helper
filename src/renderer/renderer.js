@@ -380,6 +380,7 @@ function humanizeLogLine(line) {
     { regex: /^\[tip\]\s*/i, label: "提示：" },
     { regex: /^\[warn\]\s*/i, label: "提醒：" },
     { regex: /^\[stderr\]\s*/i, label: "详细信息：" },
+    { regex: /^\[update\]\s*/i, label: "更新：" },
     { regex: /^\[gateway\]\s*/i, label: "网关：" },
     { regex: /^\[config\]\s*/i, label: "配置：" },
     { regex: /^\[markdown\]\s*/i, label: "工作区说明文档：" },
@@ -419,7 +420,7 @@ function classifyLogLine(rawText, displayText) {
   }
 
   if (
-    /^\[(npm|brew|openclaw|config|markdown|winget|gateway|boot)\]/i.test(raw) ||
+    /^\[(npm|pnpm|brew|openclaw|config|markdown|winget|gateway|boot|update)\]/i.test(raw) ||
     /^OpenClaw\b/i.test(normalizeUserFacingTerms(raw))
   ) {
     return "logLine logCmd";
@@ -2371,7 +2372,28 @@ doctorBtn.addEventListener("click", async () => {
 updateBtn.addEventListener("click", async () => {
   await withButtonLoading(updateBtn, async () => {
     const channel = updateChannel.value || "stable";
-    await runOpenclaw(["update", "--channel", channel, "--yes"], { stageLabel: "更新中…" });
+    if (taskRunning) return;
+    showOperationModal("更新中…");
+    setTaskRunning(true);
+    logEl.textContent = "";
+    setStage("更新中…");
+    setProgress(0.05);
+
+    try {
+      await installer.updateOpenclaw(channel);
+      setStage("完成");
+      setProgress(1);
+    } catch (error) {
+      const message = error?.message || String(error);
+      setStage("失败");
+      appendLog(`[错误] ${message}`);
+      showLogsCheckbox.checked = true;
+      updateLogVisibility();
+      await rerouteIfOpenclawMissing(error);
+    } finally {
+      setTaskRunning(false);
+      await checkAndRoute();
+    }
   });
 });
 
