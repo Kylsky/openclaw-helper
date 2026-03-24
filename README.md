@@ -1,18 +1,16 @@
-# OpenClaw Installer (Electron)
+# OpenClaw 助手（Tauri）
 
-一个用 **Electron** 写的 OpenClaw 安装器（兼容 Windows / macOS），用于一键准备开发/运行环境并安装 `openclaw`：
+一个基于 **Tauri** 的 OpenClaw 桌面助手，用于在 Windows / macOS 上完成安装、更新、健康检查、网关控制、插件配置和卸载清理。
 
 ## 功能
 
-- Windows：安装 `nvm-windows`（通过 `winget`）
-- Windows：自动检测系统架构并安装/升级 Node.js（通过 `winget`，确保 Node.js >= 22；在 x64 系统上优先使用 x64 Node；若检测到 32 位 Windows 会直接提示不支持）
-- macOS：优先复用系统已有 `node/npm`；如检测不到或版本过低且已安装 Homebrew，则通过 `brew install/upgrade node` 自动修复
-- 安装 `Git`（优先复用；macOS 无 Homebrew 时会尝试触发 Xcode Command Line Tools 安装）
-- 环境校验（node/npm/git 版本检测，`openclaw` 需要 Node.js >= 22）
-- 安装/更新涉及 `npm` / `pnpm` 全局包操作时，默认使用国内源 `https://registry.npmmirror.com`
-- 执行 `npm install -g openclaw`，并在命令链接缺失时自动 `--force` 修复，避免“装了但找不到命令”
-
-> 说明：macOS 若未安装 Homebrew 且本机也没有满足要求的 Node.js，会提示你先用官方安装器或版本管理器（Volta/fnm/nvm）安装 Node.js 后再重试。
+- 安装 / 更新 `openclaw`
+- 自动检测并修复常见环境问题
+- 控制 OpenClaw Gateway 的启动、停止和重启
+- 一键执行 `doctor --fix`
+- 配置中心与 Workspace Markdown 编辑
+- 微信插件配置辅助
+- 卸载 OpenClaw 并清理残留
 
 ## 开发
 
@@ -21,22 +19,79 @@ npm install
 npm run dev
 ```
 
-## 打包发布（生成安装器）
+## 打包
 
 ```bash
-npm run dist
+npm run build
 ```
 
-产物输出到 `release/`：
+默认产物位于 Tauri 输出目录：
 
-- Windows: `*.exe`（portable，可直接运行）
-- macOS: `*.dmg`
+- Windows：`src-tauri/target/release/bundle/`
+- macOS：`src-tauri/target/release/bundle/`
 
-也可以按平台打包：
+## GitHub Release
+
+当前 workflow 会在打 tag 时：
+
+- 构建 Windows / macOS 安装包
+- 上传构建产物到 GitHub Release
+- 附带上传 `.github/workflows/tauri-build.yml`
+- 附带上传 macOS 修复脚本 `scripts/macos-app-first-aid.command`
+
+## macOS 首次打开提示“App 已损坏”
+
+如果 macOS 首次打开 `OpenClaw 助手.app` 时提示“App 已损坏”或“无法验证开发者”，一般按下面步骤处理即可。
+
+通常只需要前两步：
+
+### 1）允许“任何来源”的 App 运行
+
+打开“终端”，执行：
 
 ```bash
-npm run dist:mac
-npm run dist:win
+sudo spctl --master-disable
 ```
 
-> 提示：`dist:win` 最稳妥是在 Windows 环境执行（跨平台打包可能需要额外依赖）。
+然后前往：
+
+- macOS Ventura 及更新版本：`系统设置 -> 隐私与安全性 -> 安全性`
+- 较早版本：`系统偏好设置 -> 安全性与隐私 -> 通用`
+
+勾选或确认允许“任何来源”的 App。
+
+### 2）移除应用的安全隔离属性
+
+打开“终端”，执行：
+
+```bash
+sudo xattr -dr com.apple.quarantine "/Applications/OpenClaw 助手.app"
+```
+
+如果你的 App 不在 `/Applications` 目录，请把路径替换成实际安装位置。
+
+### 3）可直接使用 Release 中附带的修复脚本
+
+Release 会附带 `macos-app-first-aid.command`，它会执行上面两条命令：
+
+```bash
+./macos-app-first-aid.command
+```
+
+如果脚本没有执行权限，可先运行：
+
+```bash
+chmod +x ./macos-app-first-aid.command
+./macos-app-first-aid.command
+```
+
+也可以给脚本传入自定义 App 路径：
+
+```bash
+./macos-app-first-aid.command "/Applications/OpenClaw 助手.app"
+```
+
+## 说明
+
+- macOS 若未安装 Homebrew 且本机也没有满足要求的 Node.js，助手会提示你先安装 Node.js 后再继续。
+- Windows 更新后，为避免弹出终端，助手不会自动重启网关；如需应用新版本，请手动启动或重启网关。

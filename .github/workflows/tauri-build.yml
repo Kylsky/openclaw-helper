@@ -1,11 +1,16 @@
 name: tauri-build
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
   push:
     branches:
       - main
       - "tauri/**"
+    tags:
+      - "*"
   pull_request:
     branches:
       - main
@@ -54,6 +59,33 @@ jobs:
           name: tauri-bundles-${{ matrix.os }}
           if-no-files-found: error
           path: |
-            src-tauri/target/release/bundle/**
+            src-tauri/target/release/bundle/${{ matrix.bundles }}/**
             src-tauri/target/release/*.exe
             src-tauri/target/release/*.msi
+
+  release:
+    name: release assets
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            .github/workflows/tauri-build.yml
+            scripts/macos-app-first-aid.command
+            release-assets/**/*
