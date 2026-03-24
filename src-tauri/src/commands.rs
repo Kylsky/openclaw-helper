@@ -109,6 +109,7 @@ fn task_meta_for_openclaw_args(args: &[String]) -> TaskMeta {
 
 const OPENCLAW_NPM_PACKAGE: &str = "openclaw";
 const DEFAULT_NPM_REGISTRY: &str = "https://registry.npmmirror.com";
+#[cfg(target_os = "windows")]
 const DEFAULT_GITHUB_MIRROR: &str = "https://gitclone.com/github.com/";
 
 #[derive(Debug, Clone)]
@@ -145,7 +146,10 @@ fn powershell_escape_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-fn cleanup_stale_plugin_stage_dirs(window: &Window, plugin_id: &str) -> Result<Vec<String>, String> {
+fn cleanup_stale_plugin_stage_dirs(
+    window: &Window,
+    plugin_id: &str,
+) -> Result<Vec<String>, String> {
     let extensions_dir = crate::openclaw::home_dir()
         .map(|home| home.join(".openclaw").join("extensions"))
         .unwrap_or_else(|| PathBuf::from(".openclaw").join("extensions"));
@@ -154,8 +158,7 @@ fn cleanup_stale_plugin_stage_dirs(window: &Window, plugin_id: &str) -> Result<V
     }
 
     let mut removed = Vec::new();
-    for entry in std::fs::read_dir(&extensions_dir)
-        .map_err(|e| format!("读取插件目录失败：{e}"))?
+    for entry in std::fs::read_dir(&extensions_dir).map_err(|e| format!("读取插件目录失败：{e}"))?
     {
         let entry = entry.map_err(|e| format!("读取插件目录条目失败：{e}"))?;
         let path = entry.path();
@@ -799,6 +802,7 @@ fn collect_gateway_status_sync(resolved: &crate::openclaw::ResolvedOpenclaw) -> 
     apply_windows_no_window(&mut cmd);
     cmd.env("PATH", &resolved.path_env);
     cmd.args(["--no-color", "gateway", "status"]);
+    #[allow(unused_mut)]
     let mut status = match cmd.output() {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -881,7 +885,7 @@ fn npm_global_bin_dir_from_prefix(prefix: &str) -> PathBuf {
     }
 }
 
-fn collect_npm_program_candidates(resolved: &crate::openclaw::ResolvedOpenclaw) -> Vec<String> {
+fn collect_npm_program_candidates(_resolved: &crate::openclaw::ResolvedOpenclaw) -> Vec<String> {
     let mut candidates: Vec<String> = Vec::new();
 
     #[cfg(target_os = "windows")]
@@ -1065,6 +1069,112 @@ fn apply_default_npm_registry_env(cmd: &mut Command) {
     cmd.env("NPM_CONFIG_REGISTRY", DEFAULT_NPM_REGISTRY);
 }
 
+fn output_looks_like_unknown_non_interactive_option(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    if !lower.contains("--non-interactive") {
+        return false;
+    }
+    let patterns = [
+        "unknown option",
+        "unknown flag",
+        "unrecognized option",
+        "unexpected argument",
+        "flag provided but not defined",
+    ];
+    patterns.iter().any(|pattern| lower.contains(pattern))
+}
+
+fn remove_non_interactive_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    args.iter()
+        .copied()
+        .filter(|arg| *arg != "--non-interactive")
+        .collect()
+}
+
+fn run_openclaw_capture_to_event(
+    window: &Window,
+    event: &str,
+    cancel: &Arc<AtomicBool>,
+    resolved: &crate::openclaw::ResolvedOpenclaw,
+    args: &[&str],
+) -> Result<(i32, String), String> {
+    check_canceled(cancel)?;
+
+    let args_for_log: Vec<String> = args.iter().map(|value| value.to_string()).collect();
+    emit_log(
+        window,
+        event,
+        format!(
+            "openclaw {} ({})",
+            redact_sensitive_args(&args_for_log),
+            resolved.source
+        ),
+    );
+
+    let mut cmd = Command::new(&resolved.command);
+    apply_windows_no_window(&mut cmd);
+    cmd.env("PATH", &resolved.path_env);
+    cmd.arg("--no-color");
+    cmd.args(args);
+
+    let captured = Arc::new(Mutex::new(String::new()));
+    let captured2 = captured.clone();
+    let w = window.clone();
+    let event_name = event.to_string();
+    let cancel2 = cancel.clone();
+    let code = spawn_with_streaming_logs_cancelable(cmd, cancel2, move |line| {
+        emit_log(&w, &event_name, line.clone());
+        if let Ok(mut buf) = captured2.lock() {
+            if buf.len() < 120_000 {
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+        }
+    })?;
+
+    let text = captured.lock().map(|s| s.clone()).unwrap_or_default();
+    Ok((code, text))
+}
+
+fn run_openclaw_with_compat_to_event(
+    window: &Window,
+    event: &str,
+    cancel: &Arc<AtomicBool>,
+    resolved: &crate::openclaw::ResolvedOpenclaw,
+    args: &[&str],
+) -> Result<(), String> {
+    let (code, output) = run_openclaw_capture_to_event(window, event, cancel, resolved, args)?;
+    if code == 0 {
+        return Ok(());
+    }
+
+    if output_looks_like_unknown_non_interactive_option(&output) {
+        if args.iter().any(|arg| *arg == "--non-interactive") {
+            let retry_args = remove_non_interactive_args(args);
+            if retry_args.len() != args.len() {
+                emit_log(
+                    window,
+                    event,
+                    "[warn] 检测到当前 OpenClaw 不支持 --non-interactive，正在自动使用兼容参数重试…",
+                );
+                let (retry_code, _) =
+                    run_openclaw_capture_to_event(window, event, cancel, resolved, &retry_args)?;
+                if retry_code == 0 {
+                    emit_log(window, event, "已使用兼容模式完成本次操作。");
+                    return Ok(());
+                }
+                emit_log(
+                    window,
+                    event,
+                    format!("[warn] 兼容重试失败（退出码 {retry_code}）。"),
+                );
+            }
+        }
+    }
+
+    Err(format!("openclaw 退出码：{code}"))
+}
+
 fn run_openclaw_update_stream_capture(
     window: &Window,
     cancel: &Arc<AtomicBool>,
@@ -1077,7 +1187,11 @@ fn run_openclaw_update_stream_capture(
     emit_log(
         window,
         "openclaw-log",
-        format!("openclaw {} ({})", redact_sensitive_args(&args_for_log), resolved.source),
+        format!(
+            "openclaw {} ({})",
+            redact_sensitive_args(&args_for_log),
+            resolved.source
+        ),
     );
     emit_log(
         window,
@@ -1278,8 +1392,9 @@ fn maybe_run_post_update_tasks(
         "openclaw-log",
         "[update] 包管理器升级完成，开始执行健康检查…",
     );
-    match run_openclaw_stream(
+    match run_openclaw_with_compat_to_event(
         window,
+        "openclaw-log",
         cancel,
         resolved,
         &["doctor", "--fix", "--yes", "--non-interactive"],
@@ -1394,8 +1509,25 @@ pub async fn update_openclaw(
             "--yes",
             "--non-interactive",
         ];
-        let (code, output) = run_openclaw_update_stream_capture(&w2, &cancel2, &resolved, &update_args)?;
+        let (code, output) =
+            run_openclaw_update_stream_capture(&w2, &cancel2, &resolved, &update_args)?;
         if code != 0 {
+            if output_looks_like_unknown_non_interactive_option(&output) {
+                emit_log(
+                    &w2,
+                    "openclaw-log",
+                    "[warn] 检测到更新后的兼容检查不支持 --non-interactive；更新主流程可能已完成，正在补跑兼容修复…",
+                );
+                run_openclaw_with_compat_to_event(
+                    &w2,
+                    "openclaw-log",
+                    &cancel2,
+                    &resolved,
+                    &["doctor", "--fix", "--yes"],
+                )?;
+                emit_log(&w2, "openclaw-log", "已通过兼容模式完成更新后的修复。");
+                return Ok(());
+            }
             return Err(format!("openclaw 退出码：{code}"));
         }
 
@@ -1439,12 +1571,6 @@ pub async fn run_openclaw(
     // processing other invocations (like cancel_task).
     let join = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
-
-        emit_log(
-            &w2,
-            "openclaw-log",
-            format!("openclaw {} ({})", args.join(" "), resolved.source),
-        );
 
         // Windows: installing the gateway service needs admin privileges (schtasks create).
         // If user isn't elevated, run `openclaw gateway install` via UAC so "Start" works in-app.
@@ -1498,23 +1624,8 @@ pub async fn run_openclaw(
             }
         }
 
-        let mut cmd = Command::new(&resolved.command);
-        apply_windows_no_window(&mut cmd);
-        cmd.env("PATH", &resolved.path_env);
-        cmd.arg("--no-color");
-        for a in args {
-            cmd.arg(a);
-        }
-
-        let w3 = w2.clone();
-        let code = spawn_with_streaming_logs_cancelable(cmd, cancel2, move |line| {
-            emit_log(&w3, "openclaw-log", line)
-        })?;
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(format!("openclaw 退出码：{code}"))
-        }
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_openclaw_with_compat_to_event(&w2, "openclaw-log", &cancel2, &resolved, &arg_refs)
     });
 
     let result = match join.await {
@@ -1569,7 +1680,11 @@ pub async fn run_weixin_config(
                 || install_lower.contains("already installed")
                 || install_lower.contains("install record already exists")
             {
-                emit_log(&w2, "install-log", "[weixin] 检测到插件已存在，改为更新插件...");
+                emit_log(
+                    &w2,
+                    "install-log",
+                    "[weixin] 检测到插件已存在，改为更新插件...",
+                );
                 let (update_code, _update_output) = run_openclaw_stream_capture(
                     &w2,
                     &cancel2,
@@ -1615,22 +1730,14 @@ pub async fn run_weixin_config(
         }
 
         emit_log(&w2, "install-log", "[weixin] 校验频道注册状态...");
-        let (channels_code, channels_output) = run_openclaw_stream_capture(
-            &w2,
-            &cancel2,
-            &resolved,
-            &["channels", "list"],
-        )?;
+        let (channels_code, channels_output) =
+            run_openclaw_stream_capture(&w2, &cancel2, &resolved, &["channels", "list"])?;
         if channels_code != 0 {
             return Err(format!("读取频道列表失败（退出码 {channels_code}）"));
         }
         if !channels_output.to_ascii_lowercase().contains(plugin_id) {
-            let (doctor_code, _doctor_output) = run_openclaw_stream_capture(
-                &w2,
-                &cancel2,
-                &resolved,
-                &["plugins", "doctor"],
-            )?;
+            let (doctor_code, _doctor_output) =
+                run_openclaw_stream_capture(&w2, &cancel2, &resolved, &["plugins", "doctor"])?;
             return Err(format!(
                 "微信插件已安装，但频道尚未注册成功。已执行插件诊断（退出码 {doctor_code}），请查看上方日志。"
             ));
@@ -1762,11 +1869,6 @@ pub async fn uninstall_openclaw(
                     resolved.source
                 ),
             );
-            emit_log(
-                &w2,
-                "install-log",
-                "openclaw uninstall --service --state --workspace --yes --non-interactive",
-            );
         } else {
             emit_log(
                 &w2,
@@ -1777,29 +1879,28 @@ pub async fn uninstall_openclaw(
 
         // 1) OpenClaw's own uninstaller (service/state/workspace).
         if let Some(resolved) = resolved.as_ref() {
-            let mut cmd = Command::new(&resolved.command);
-            apply_windows_no_window(&mut cmd);
-            cmd.env("PATH", &resolved.path_env);
-            cmd.args([
+            let uninstall_args = [
                 "uninstall",
                 "--service",
                 "--state",
                 "--workspace",
                 "--yes",
                 "--non-interactive",
-            ]);
-            let w = w2.clone();
-            let code = spawn_with_streaming_logs_cancelable(cmd, cancel2.clone(), move |line| {
-                emit_log(&w, "install-log", line)
-            })?;
-            if code != 0 {
+            ];
+            if let Err(err) = run_openclaw_with_compat_to_event(
+                &w2,
+                "install-log",
+                &cancel2,
+                resolved,
+                &uninstall_args,
+            ) {
                 // If the CLI is partially broken (common when npm shims remain but module files are gone),
                 // continue with manual cleanup so the user can still recover.
                 emit_log(
                     &w2,
                     "install-log",
                     format!(
-            "[warn] openclaw uninstall 失败（退出码 {code}），将继续尝试通过 npm/pnpm 等方式清理…"
+            "[warn] openclaw uninstall 失败（{err}），将继续尝试通过 npm/pnpm 等方式清理…"
           ),
                 );
             }
@@ -2939,8 +3040,7 @@ fn start_install_blocking(
             }
             path_env = create_base_path_env();
         }
-        let git_ok2 = command_output_cancelable(&path_env, "git", &["--version"], cancel)
-            .is_ok();
+        let git_ok2 = command_output_cancelable(&path_env, "git", &["--version"], cancel).is_ok();
         if !git_ok2 {
             return Err("未检测到 git。请先安装 git（推荐：Homebrew 安装 git，或安装 Xcode Command Line Tools）。".into());
         }

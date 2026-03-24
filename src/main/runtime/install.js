@@ -1757,6 +1757,29 @@ function parseVersionFromOutput(text) {
   return null;
 }
 
+function getProcessOutputText(value) {
+  if (!value) return "";
+  const stdout = typeof value.stdout === "string" ? value.stdout : "";
+  const stderr = typeof value.stderr === "string" ? value.stderr : "";
+  return `${stdout}\n${stderr}`;
+}
+
+function outputLooksLikeUnknownNonInteractiveOption(text) {
+  const normalized = String(text ?? "").toLowerCase();
+  if (!normalized.includes("--non-interactive")) return false;
+  return [
+    "unknown option",
+    "unknown flag",
+    "unrecognized option",
+    "unexpected argument",
+    "flag provided but not defined"
+  ].some((pattern) => normalized.includes(pattern));
+}
+
+function removeNonInteractiveArgs(args) {
+  return Array.isArray(args) ? args.filter((arg) => String(arg) !== "--non-interactive") : [];
+}
+
 async function getOpenclawInfo({ withHelp = false } = {}) {
   const env = createBaseEnv();
   const resolved = await resolveOpenclawExecution({ env });
@@ -1810,16 +1833,14 @@ async function getOpenclawInfo({ withHelp = false } = {}) {
   }
 }
 
-async function runOpenclawCommand({ signal, args, onLog }) {
-  if (!Array.isArray(args) || args.length === 0) {
-    throw new Error("缺少 openclaw 参数");
-  }
-
-  const env = createBaseEnv();
-  const resolved = await resolveOpenclawExecution({ env, signal, onLog });
-  if (!resolved) throw new Error("未检测到 openclaw，请先完成安装。");
-  const baseEnv = resolved.env;
-
+async function executeResolvedOpenclawCommand({
+  resolved,
+  baseEnv,
+  signal,
+  args,
+  onLog,
+  collectOutput = false
+}) {
   // Windows: by default, avoid Scheduled Task service and run gateway directly (no admin).
   if (process.platform === "win32" && args?.[0] === "gateway" && args.length >= 2) {
     const isStart = args[1] === "start" && args.length === 2;
@@ -1827,7 +1848,7 @@ async function runOpenclawCommand({ signal, args, onLog }) {
     if (isStart) {
       if (windowsDirectGatewayProcess?.pid && windowsDirectGatewayProcess.exitCode == null) {
         onLog?.("[gateway] 已在运行（direct）");
-        return { ok: true };
+        return { code: 0, stdout: "", stderr: "" };
       }
 
       const finalArgs = ["--no-color", "gateway"];
@@ -1846,7 +1867,7 @@ async function runOpenclawCommand({ signal, args, onLog }) {
       }
       onLog?.(`[gateway] direct started (pid=${child.pid})`);
       onLog?.("[tip] 若状态未及时刷新，请等待几秒后点击“检查网关状态”。");
-      return { ok: true };
+      return { code: 0, stdout: "", stderr: "" };
     }
 
     if (isStop) {
@@ -1883,7 +1904,7 @@ async function runOpenclawCommand({ signal, args, onLog }) {
       } else {
         onLog?.("[gateway] 未发现可停止的网关监听进程（已跳过 Scheduled Task 停止）。");
       }
-      return { ok: true };
+      return { code: 0, stdout: "", stderr: "" };
     }
   }
 
@@ -1891,18 +1912,79 @@ async function runOpenclawCommand({ signal, args, onLog }) {
   onLog?.(`openclaw ${finalArgs.join(" ")} (${resolved.source})`);
 
   if (process.platform === "win32") {
-    await runWindowsShim({
+    return await runWindowsShim({
       baseCommand: resolved.command,
       args: finalArgs,
       env: baseEnv,
       signal,
-      onLog
+      onLog,
+      collectOutput
     });
-    return { ok: true };
   }
 
-  await runProcess({ command: resolved.command, args: finalArgs, env: baseEnv, signal, onLog });
-  return { ok: true };
+  return await runProcess({
+    command: resolved.command,
+    args: finalArgs,
+    env: baseEnv,
+    signal,
+    onLog,
+    collectOutput
+  });
+}
+
+async function runOpenclawCommand({ signal, args, onLog }) {
+  if (!Array.isArray(args) || args.length === 0) {
+    throw new Error("缺少 openclaw 参数");
+  }
+
+  const env = createBaseEnv();
+  const resolved = await resolveOpenclawExecution({ env, signal, onLog });
+  if (!resolved) throw new Error("未检测到 openclaw，请先完成安装。");
+  const baseEnv = resolved.env;
+
+  try {
+    await executeResolvedOpenclawCommand({ resolved, baseEnv, signal, args, onLog });
+    return { ok: true };
+  } catch (error) {
+    const outputText = getProcessOutputText(error);
+
+    if (outputLooksLikeUnknownNonInteractiveOption(outputText)) {
+      if (args.includes("--non-interactive")) {
+        const retryArgs = removeNonInteractiveArgs(args);
+        if (retryArgs.length !== args.length) {
+          onLog?.(
+            "[warn] 检测到当前 OpenClaw 不支持 --non-interactive，正在自动使用兼容参数重试…"
+          );
+          await executeResolvedOpenclawCommand({
+            resolved,
+            baseEnv,
+            signal,
+            args: retryArgs,
+            onLog
+          });
+          onLog?.("已使用兼容模式完成本次操作。");
+          return { ok: true };
+        }
+      }
+
+      if (args[0] === "update") {
+        onLog?.(
+          "[warn] 检测到更新后的兼容检查不支持 --non-interactive；更新主流程可能已完成，正在补跑兼容修复…"
+        );
+        await executeResolvedOpenclawCommand({
+          resolved,
+          baseEnv,
+          signal,
+          args: ["doctor", "--fix", "--yes"],
+          onLog
+        });
+        onLog?.("已通过兼容模式完成更新后的修复。");
+        return { ok: true };
+      }
+    }
+
+    throw error;
+  }
 }
 
 async function runOpenclawCommandCollect({ signal, args, onLog }) {
@@ -1915,25 +1997,11 @@ async function runOpenclawCommandCollect({ signal, args, onLog }) {
   if (!resolved) throw new Error("未检测到 openclaw，请先完成安装。");
   const baseEnv = resolved.env;
 
-  const finalArgs = ["--no-color", ...args];
-  onLog?.(`openclaw ${finalArgs.join(" ")} (${resolved.source})`);
-
-  if (process.platform === "win32") {
-    return await runWindowsShim({
-      baseCommand: resolved.command,
-      args: finalArgs,
-      env: baseEnv,
-      signal,
-      onLog,
-      collectOutput: true
-    });
-  }
-
-  return await runProcess({
-    command: resolved.command,
-    args: finalArgs,
-    env: baseEnv,
+  return await executeResolvedOpenclawCommand({
+    resolved,
+    baseEnv,
     signal,
+    args,
     onLog,
     collectOutput: true
   });

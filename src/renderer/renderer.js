@@ -278,6 +278,18 @@ function humanizeLogLine(line) {
     return "没有发现仍在运行的网关进程，无需继续停止。";
   }
   if (raw === "[gateway] 已在运行（direct）") return "网关已经在运行，无需重复启动。";
+  if (raw === "[warn] 检测到当前 OpenClaw 不支持 --non-interactive，正在自动使用兼容参数重试…") {
+    return "检测到当前 OpenClaw 版本较旧，正在自动切换到兼容模式重试…";
+  }
+  if (raw === "已使用兼容模式完成本次操作。") {
+    return "已自动切换为兼容模式，本次操作已完成。";
+  }
+  if (raw === "[warn] 检测到更新后的兼容检查不支持 --non-interactive；更新主流程可能已完成，正在补跑兼容修复…") {
+    return "更新主体看起来已经完成，正在用兼容方式补做收尾修复…";
+  }
+  if (raw === "已通过兼容模式完成更新后的修复。") {
+    return "更新已完成，并已自动补做兼容修复。";
+  }
 
   match = raw.match(/^平台：(.+?) \/ (.+)$/);
   if (match) return `当前系统：${formatPlatformName(match[1])} ${String(match[2]).toUpperCase()}`;
@@ -2363,7 +2375,7 @@ gatewayRestartBtn.addEventListener("click", async () => {
 
 doctorBtn.addEventListener("click", async () => {
   await withButtonLoading(doctorBtn, async () => {
-    await runOpenclaw(["doctor", "--fix", "--yes", "--non-interactive"], {
+    await runOpenclaw(["doctor", "--fix", "--yes"], {
       stageLabel: "健康检查/修复…"
     });
   });
