@@ -211,6 +211,285 @@ fn cleanup_stale_plugin_stage_dirs(
     Ok(removed)
 }
 
+fn openclaw_extensions_dir() -> PathBuf {
+    crate::openclaw::home_dir()
+        .map(|home| home.join(".openclaw").join("extensions"))
+        .unwrap_or_else(|| PathBuf::from(".openclaw").join("extensions"))
+}
+
+fn resolve_installed_plugin_dir(plugin_id: &str) -> PathBuf {
+    openclaw_extensions_dir().join(plugin_id)
+}
+
+fn is_openclaw_package_root(path: &Path) -> bool {
+    let package_json = path.join("package.json");
+    if !package_json.is_file() {
+        return false;
+    }
+
+    read_json_file(&package_json)
+        .ok()
+        .and_then(|root| {
+            root.get("name")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .map(|name| name == OPENCLAW_NPM_PACKAGE)
+        .unwrap_or(false)
+}
+
+fn resolve_openclaw_package_root_from_command(
+    resolved: &crate::openclaw::ResolvedOpenclaw,
+) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(canonical) = std::fs::canonicalize(&resolved.command) {
+        candidates.push(canonical);
+    }
+    candidates.push(resolved.command.clone());
+
+    for candidate in candidates {
+        let direct_parent = candidate.parent().map(Path::to_path_buf);
+        let grand_parent = direct_parent
+            .as_ref()
+            .and_then(|parent| parent.parent().map(Path::to_path_buf));
+
+        for dir in [direct_parent, grand_parent].into_iter().flatten() {
+            if is_openclaw_package_root(&dir) {
+                return Some(dir);
+            }
+        }
+    }
+
+    None
+}
+
+fn resolve_host_openclaw_package_root(
+    resolved: &crate::openclaw::ResolvedOpenclaw,
+) -> Option<PathBuf> {
+    if let Some(path) = resolve_openclaw_package_root_from_command(resolved) {
+        return Some(path);
+    }
+
+    detect_package_manager_for_update(resolved)
+        .map(|candidate| candidate.package_root.join(OPENCLAW_NPM_PACKAGE))
+        .filter(|path| is_openclaw_package_root(path))
+}
+
+fn is_helper_openclaw_compat_shim(path: &Path) -> bool {
+    let package_json = path.join("package.json");
+    if !package_json.is_file() {
+        return false;
+    }
+
+    read_json_file(&package_json)
+        .ok()
+        .and_then(|root| {
+            root.get("openclawHelperCompat")
+                .and_then(|value| value.as_bool())
+        })
+        .unwrap_or(false)
+}
+
+fn remove_path_for_plugin_bridge(path: &Path) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("读取 {} 元数据失败：{e}", path.to_string_lossy()))?;
+    let kind = meta.file_type();
+    if kind.is_symlink() || kind.is_file() {
+        std::fs::remove_file(path).map_err(|e| format!("删除 {} 失败：{e}", path.to_string_lossy()))
+    } else if kind.is_dir() {
+        std::fs::remove_dir_all(path)
+            .map_err(|e| format!("删除 {} 失败：{e}", path.to_string_lossy()))
+    } else {
+        Err(format!("无法处理兼容链接路径：{}", path.to_string_lossy()))
+    }
+}
+
+fn encode_file_url_path(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' | b':' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+    out
+}
+
+fn js_module_specifier_for_path(path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+    #[cfg(target_os = "windows")]
+    let raw_path = {
+        let mut text = canonical.to_string_lossy().replace('\\', "/");
+        if let Some(stripped) = text.strip_prefix("//?/") {
+            text = stripped.to_string();
+        }
+        if !text.starts_with('/') {
+            text = format!("/{text}");
+        }
+        text
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let raw_path = canonical.to_string_lossy().to_string();
+
+    format!("file://{}", encode_file_url_path(&raw_path))
+}
+
+fn write_plugin_compat_shim_file(path: &Path, content: &str) -> Result<(), String> {
+    std::fs::write(path, content).map_err(|e| format!("写入 {} 失败：{e}", path.to_string_lossy()))
+}
+
+fn write_plugin_host_compat_shim(shim_root: &Path, host_package_root: &Path) -> Result<(), String> {
+    let plugin_sdk_dir = shim_root.join("plugin-sdk");
+    std::fs::create_dir_all(&plugin_sdk_dir).map_err(|e| {
+        format!(
+            "创建兼容目录失败：{} ({e})",
+            plugin_sdk_dir.to_string_lossy()
+        )
+    })?;
+
+    let host_plugin_sdk_index = js_module_specifier_for_path(
+        &host_package_root
+            .join("dist")
+            .join("plugin-sdk")
+            .join("index.js"),
+    );
+    let host_plugin_sdk_core = js_module_specifier_for_path(
+        &host_package_root
+            .join("dist")
+            .join("plugin-sdk")
+            .join("core.js"),
+    );
+    let host_plugin_sdk_infra = js_module_specifier_for_path(
+        &host_package_root
+            .join("dist")
+            .join("plugin-sdk")
+            .join("infra-runtime.js"),
+    );
+    let host_plugin_sdk_text = js_module_specifier_for_path(
+        &host_package_root
+            .join("dist")
+            .join("plugin-sdk")
+            .join("text-runtime.js"),
+    );
+
+    let package_json = r#"{
+  "name": "openclaw",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0-openclaw-helper-compat",
+  "openclawHelperCompat": true
+}
+"#;
+    let index_js = format!(
+        "export * from {:?};\nexport * from {:?};\nexport {{ resolvePreferredOpenClawTmpDir, withFileLock }} from {:?};\nexport {{ stripMarkdown }} from {:?};\n",
+        host_plugin_sdk_index,
+        host_plugin_sdk_core,
+        host_plugin_sdk_infra,
+        host_plugin_sdk_text
+    );
+    let core_js = format!("export * from {:?};\n", host_plugin_sdk_core);
+    let infra_js = format!("export * from {:?};\n", host_plugin_sdk_infra);
+    let text_js = format!("export * from {:?};\n", host_plugin_sdk_text);
+
+    write_plugin_compat_shim_file(&shim_root.join("package.json"), package_json)?;
+    write_plugin_compat_shim_file(&plugin_sdk_dir.join("index.js"), &index_js)?;
+    write_plugin_compat_shim_file(&plugin_sdk_dir.join("core.js"), &core_js)?;
+    write_plugin_compat_shim_file(&plugin_sdk_dir.join("infra-runtime.js"), &infra_js)?;
+    write_plugin_compat_shim_file(&plugin_sdk_dir.join("text-runtime.js"), &text_js)?;
+    Ok(())
+}
+
+fn ensure_plugin_host_package_bridge(
+    window: &Window,
+    resolved: &crate::openclaw::ResolvedOpenclaw,
+    plugin_id: &str,
+) -> Result<(), String> {
+    let plugin_dir = resolve_installed_plugin_dir(plugin_id);
+    if !plugin_dir.is_dir() {
+        emit_log(
+            window,
+            "install-log",
+            format!(
+                "[weixin] 未找到插件目录，跳过 SDK 兼容层校验：{}",
+                plugin_dir.to_string_lossy()
+            ),
+        );
+        return Ok(());
+    }
+
+    let Some(host_package_root) = resolve_host_openclaw_package_root(resolved) else {
+        emit_log(
+            window,
+            "install-log",
+            "[weixin] 未能定位宿主 OpenClaw 包目录，跳过 SDK 兼容层补齐。",
+        );
+        return Ok(());
+    };
+
+    let node_modules_dir = plugin_dir.join("node_modules");
+    let bridge_path = node_modules_dir.join(OPENCLAW_NPM_PACKAGE);
+
+    if bridge_path.exists() {
+        let replaceable = is_helper_openclaw_compat_shim(&bridge_path)
+            || std::fs::symlink_metadata(&bridge_path)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false);
+
+        if !replaceable {
+            if let Ok(canonical_existing) = std::fs::canonicalize(&bridge_path) {
+                if same_path(&canonical_existing, &host_package_root) {
+                    remove_path_for_plugin_bridge(&bridge_path)?;
+                } else {
+                    emit_log(
+                        window,
+                        "install-log",
+                        format!(
+                            "[weixin] 插件目录已存在自定义 openclaw 依赖，保留现状：{}",
+                            bridge_path.to_string_lossy()
+                        ),
+                    );
+                    return Ok(());
+                }
+            } else {
+                emit_log(
+                    window,
+                    "install-log",
+                    format!(
+                        "[weixin] 插件目录已存在不可识别的 openclaw 依赖，保留现状：{}",
+                        bridge_path.to_string_lossy()
+                    ),
+                );
+                return Ok(());
+            }
+        } else {
+            remove_path_for_plugin_bridge(&bridge_path)?;
+        }
+    }
+
+    std::fs::create_dir_all(&node_modules_dir).map_err(|e| {
+        format!(
+            "创建插件依赖目录失败：{} ({e})",
+            node_modules_dir.to_string_lossy()
+        )
+    })?;
+    write_plugin_host_compat_shim(&bridge_path, &host_package_root)?;
+    emit_log(
+        window,
+        "install-log",
+        format!(
+            "[weixin] 已生成宿主 SDK 兼容层：{} -> {}",
+            bridge_path.to_string_lossy(),
+            host_package_root.to_string_lossy()
+        ),
+    );
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 fn run_openclaw_elevated(
     window: &Window,
@@ -1699,6 +1978,9 @@ pub async fn run_weixin_config(
             }
         }
 
+        emit_log(&w2, "install-log", "[weixin] 校验插件 SDK 兼容层...");
+        ensure_plugin_host_package_bridge(&w2, &resolved, plugin_id)?;
+
         emit_log(
             &w2,
             "install-log",
@@ -1733,23 +2015,41 @@ pub async fn run_weixin_config(
         let (channels_code, channels_output) =
             run_openclaw_stream_capture(&w2, &cancel2, &resolved, &["channels", "list"])?;
         if channels_code != 0 {
+            let channels_lower = channels_output.to_ascii_lowercase();
+            if channels_lower.contains("cannot find module 'openclaw/plugin-sdk'")
+                || channels_lower.contains("cannot find module \"openclaw/plugin-sdk\"")
+            {
+                return Err(
+                    "微信插件已安装，但当前 OpenClaw 运行时无法从插件目录解析 openclaw/plugin-sdk；helper 已尝试补齐兼容层，请查看上方日志并重试。"
+                        .into(),
+                );
+            }
             return Err(format!("读取频道列表失败（退出码 {channels_code}）"));
-        }
-        if !channels_output.to_ascii_lowercase().contains(plugin_id) {
-            let (doctor_code, _doctor_output) =
-                run_openclaw_stream_capture(&w2, &cancel2, &resolved, &["plugins", "doctor"])?;
-            return Err(format!(
-                "微信插件已安装，但频道尚未注册成功。已执行插件诊断（退出码 {doctor_code}），请查看上方日志。"
-            ));
         }
 
         emit_log(&w2, "install-log", "[weixin] 插件就绪，开始首次连接...");
-        run_openclaw_stream(
+        let (login_code, login_output) = run_openclaw_stream_capture(
             &w2,
             &cancel2,
             &resolved,
             &["channels", "login", "--channel", plugin_id],
         )?;
+        if login_code != 0 {
+            let login_lower = login_output.to_ascii_lowercase();
+            let (doctor_code, _doctor_output) =
+                run_openclaw_stream_capture(&w2, &cancel2, &resolved, &["plugins", "doctor"])?;
+            if login_lower.contains("unknown channel")
+                || login_lower.contains("not configured")
+                || login_lower.contains("channel alias")
+            {
+                return Err(format!(
+                    "微信插件已加载，但 OpenClaw 当前仍未识别到 {plugin_id} 频道。已执行插件诊断（退出码 {doctor_code}），请查看上方日志。"
+                ));
+            }
+            return Err(format!(
+                "微信首次连接失败（退出码 {login_code}）。已执行插件诊断（退出码 {doctor_code}），请查看上方日志。"
+            ));
+        }
 
         emit_log(&w2, "install-log", "[weixin] 微信接入配置完成。");
         Ok(())
