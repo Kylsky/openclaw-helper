@@ -344,6 +344,55 @@ fn write_plugin_compat_shim_file(path: &Path, content: &str) -> Result<(), Strin
     std::fs::write(path, content).map_err(|e| format!("写入 {} 失败：{e}", path.to_string_lossy()))
 }
 
+fn write_plugin_sdk_proxy_tree(
+    shim_root: &Path,
+    host_plugin_sdk_root: &Path,
+) -> Result<(), String> {
+    let mut stack = vec![host_plugin_sdk_root.to_path_buf()];
+
+    while let Some(current_dir) = stack.pop() {
+        for entry in std::fs::read_dir(&current_dir)
+            .map_err(|e| format!("读取 {} 失败：{e}", current_dir.to_string_lossy()))?
+        {
+            let entry = entry.map_err(|e| format!("读取目录条目失败：{e}"))?;
+            let path = entry.path();
+            let relative = path.strip_prefix(host_plugin_sdk_root).map_err(|e| {
+                format!(
+                    "计算 plugin-sdk 相对路径失败：{} ({e})",
+                    path.to_string_lossy()
+                )
+            })?;
+
+            if path.is_dir() {
+                std::fs::create_dir_all(shim_root.join(relative)).map_err(|e| {
+                    format!(
+                        "创建兼容目录失败：{} ({e})",
+                        shim_root.join(relative).to_string_lossy()
+                    )
+                })?;
+                stack.push(path);
+                continue;
+            }
+
+            if path.extension().and_then(|ext| ext.to_str()) != Some("js") {
+                continue;
+            }
+
+            let proxy_path = shim_root.join(relative);
+            if let Some(parent) = proxy_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    format!("创建兼容目录失败：{} ({e})", parent.to_string_lossy())
+                })?;
+            }
+            let host_specifier = js_module_specifier_for_path(&path);
+            let content = format!("export * from {:?};\n", host_specifier);
+            write_plugin_compat_shim_file(&proxy_path, &content)?;
+        }
+    }
+
+    Ok(())
+}
+
 fn write_plugin_host_compat_shim(shim_root: &Path, host_package_root: &Path) -> Result<(), String> {
     let plugin_sdk_dir = shim_root.join("plugin-sdk");
     std::fs::create_dir_all(&plugin_sdk_dir).map_err(|e| {
@@ -353,29 +402,20 @@ fn write_plugin_host_compat_shim(shim_root: &Path, host_package_root: &Path) -> 
         )
     })?;
 
+    let host_plugin_sdk_root = host_package_root.join("dist").join("plugin-sdk");
+    write_plugin_sdk_proxy_tree(&plugin_sdk_dir, &host_plugin_sdk_root)?;
+
     let host_plugin_sdk_index = js_module_specifier_for_path(
-        &host_package_root
-            .join("dist")
-            .join("plugin-sdk")
-            .join("index.js"),
+        &host_plugin_sdk_root.join("index.js"),
     );
     let host_plugin_sdk_core = js_module_specifier_for_path(
-        &host_package_root
-            .join("dist")
-            .join("plugin-sdk")
-            .join("core.js"),
+        &host_plugin_sdk_root.join("core.js"),
     );
     let host_plugin_sdk_infra = js_module_specifier_for_path(
-        &host_package_root
-            .join("dist")
-            .join("plugin-sdk")
-            .join("infra-runtime.js"),
+        &host_plugin_sdk_root.join("infra-runtime.js"),
     );
     let host_plugin_sdk_text = js_module_specifier_for_path(
-        &host_package_root
-            .join("dist")
-            .join("plugin-sdk")
-            .join("text-runtime.js"),
+        &host_plugin_sdk_root.join("text-runtime.js"),
     );
 
     let package_json = r#"{
@@ -383,6 +423,10 @@ fn write_plugin_host_compat_shim(shim_root: &Path, host_package_root: &Path) -> 
   "private": true,
   "type": "module",
   "version": "0.0.0-openclaw-helper-compat",
+  "exports": {
+    "./plugin-sdk": "./plugin-sdk/index.js",
+    "./plugin-sdk/*": "./plugin-sdk/*.js"
+  },
   "openclawHelperCompat": true
 }
 "#;
