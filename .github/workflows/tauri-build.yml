@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - codex/tauri-migration
+      - main
       - "tauri/**"
   pull_request:
     branches:
-      - codex/tauri-migration
+      - main
       - "tauri/**"
 
 jobs:
