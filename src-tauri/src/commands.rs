@@ -1,7 +1,8 @@
 use crate::openclaw::{
     apply_windows_no_window, capture_command_output_cancelable, cleanup_all_mac_nvm_openclaw,
-    cleanup_mac_nvm_openclaw, create_base_path_env, get_openclaw_info, parse_gateway_status,
-    resolve_command_in_path, resolve_openclaw, spawn_with_streaming_logs_cancelable,
+    cleanup_mac_nvm_openclaw, create_base_path_env, create_openclaw_command, get_openclaw_info,
+    parse_gateway_status, resolve_command_in_path, resolve_openclaw,
+    spawn_with_streaming_logs_cancelable,
     CapturedCommandOutput, GatewayStatus, OpenclawInfo,
 };
 use serde::Deserialize;
@@ -697,9 +698,7 @@ fn windows_extract_port_from_url(url: &str) -> Option<u16> {
 
 #[cfg(target_os = "windows")]
 fn windows_gateway_status_text(resolved: &crate::openclaw::ResolvedOpenclaw) -> Option<String> {
-    let mut cmd = Command::new(&resolved.command);
-    apply_windows_no_window(&mut cmd);
-    cmd.env("PATH", &resolved.path_env);
+    let mut cmd = create_openclaw_command(resolved);
     cmd.args(["--no-color", "gateway", "status"]);
     let out = cmd.output().ok()?;
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -807,9 +806,7 @@ fn windows_gateway_start_direct(
         "[windows] 使用 direct 模式启动网关（不依赖 Scheduled Task / 无需管理员）",
     );
 
-    let mut cmd = Command::new(&resolved.command);
-    apply_windows_no_window(&mut cmd);
-    cmd.env("PATH", &resolved.path_env);
+    let mut cmd = create_openclaw_command(resolved);
     cmd.args(["--no-color", "gateway"]);
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
@@ -1077,9 +1074,7 @@ pub async fn get_gateway_status() -> GatewayStatus {
 }
 
 fn collect_gateway_status_sync(resolved: &crate::openclaw::ResolvedOpenclaw) -> GatewayStatus {
-    let mut cmd = Command::new(&resolved.command);
-    apply_windows_no_window(&mut cmd);
-    cmd.env("PATH", &resolved.path_env);
+    let mut cmd = create_openclaw_command(resolved);
     cmd.args(["--no-color", "gateway", "status"]);
     #[allow(unused_mut)]
     let mut status = match cmd.output() {
@@ -1164,7 +1159,7 @@ fn npm_global_bin_dir_from_prefix(prefix: &str) -> PathBuf {
     }
 }
 
-fn collect_npm_program_candidates(_resolved: &crate::openclaw::ResolvedOpenclaw) -> Vec<String> {
+fn collect_npm_program_candidates(resolved: &crate::openclaw::ResolvedOpenclaw) -> Vec<String> {
     let mut candidates: Vec<String> = Vec::new();
 
     #[cfg(target_os = "windows")]
@@ -1363,6 +1358,19 @@ fn output_looks_like_unknown_non_interactive_option(output: &str) -> bool {
     patterns.iter().any(|pattern| lower.contains(pattern))
 }
 
+fn output_looks_like_windows_file_busy(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("ebusy")
+        || lower.contains("errno -4082")
+        || (lower.contains("syscall copyfile") && lower.contains("npm error"))
+        || lower.contains("resource busy or locked")
+}
+
+fn output_mentions_missing_plugin_sdk(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("cannot find module") && lower.contains("plugin-sdk")
+}
+
 fn remove_non_interactive_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
     args.iter()
         .copied()
@@ -1390,9 +1398,7 @@ fn run_openclaw_capture_to_event(
         ),
     );
 
-    let mut cmd = Command::new(&resolved.command);
-    apply_windows_no_window(&mut cmd);
-    cmd.env("PATH", &resolved.path_env);
+    let mut cmd = create_openclaw_command(resolved);
     cmd.arg("--no-color");
     cmd.args(args);
 
@@ -1478,9 +1484,7 @@ fn run_openclaw_update_stream_capture(
         format!("[update] npm registry: {DEFAULT_NPM_REGISTRY}"),
     );
 
-    let mut cmd = Command::new(&resolved.command);
-    apply_windows_no_window(&mut cmd);
-    cmd.env("PATH", &resolved.path_env);
+    let mut cmd = create_openclaw_command(resolved);
     cmd.stdin(std::process::Stdio::null());
     cmd.env("npm_config_progress", "false");
     cmd.env("npm_config_fund", "false");
@@ -1537,9 +1541,7 @@ fn run_openclaw_stream_capture_with_extra_env(
         ),
     );
 
-    let mut cmd = Command::new(&resolved.command);
-    apply_windows_no_window(&mut cmd);
-    cmd.env("PATH", &resolved.path_env);
+    let mut cmd = create_openclaw_command(resolved);
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
@@ -1692,6 +1694,14 @@ fn maybe_run_post_update_tasks(
     }
 
     if !gateway_was_running {
+        #[cfg(target_os = "windows")]
+        emit_log(
+            window,
+            "openclaw-log",
+            "[update] 更新前网关未运行。为避免弹出终端，助手不会自动启动网关；如需使用新版本，请稍后手动启动或重启网关。",
+        );
+
+        #[cfg(not(target_os = "windows"))]
         emit_log(
             window,
             "openclaw-log",
@@ -1704,44 +1714,25 @@ fn maybe_run_post_update_tasks(
         return Ok(());
     }
 
-    emit_log(
-        window,
-        "openclaw-log",
-        "[update] 更新前检测到网关正在运行，尝试自动重启…",
-    );
-
     #[cfg(target_os = "windows")]
     {
-        match windows_gateway_stop_direct_best_effort(window, resolved) {
-            Ok(_) => {}
-            Err(err) => {
-                if err == "用户取消" {
-                    return Err(err);
-                }
-                emit_log(
-                    window,
-                    "openclaw-log",
-                    format!("[warn] 自动停止网关失败：{err}"),
-                );
-            }
-        }
-        match windows_gateway_start_direct(window, cancel, resolved) {
-            Ok(()) => emit_log(window, "openclaw-log", "[update] 网关已自动重启。"),
-            Err(err) => {
-                if err == "用户取消" {
-                    return Err(err);
-                }
-                emit_log(
-                    window,
-                    "openclaw-log",
-                    format!("[warn] 自动启动网关失败：{err}"),
-                );
-            }
-        }
+        emit_log(
+            window,
+            "openclaw-log",
+            "[update] 更新前检测到网关正在运行。为避免弹出终端，已跳过自动重启；请稍后手动重启网关以应用新版本。",
+        );
+        emit_log(window, "openclaw-log", "[update] 自动更新流程完成。");
+        return Ok(());
     }
 
     #[cfg(not(target_os = "windows"))]
     {
+        emit_log(
+            window,
+            "openclaw-log",
+            "[update] 更新前检测到网关正在运行，尝试自动重启…",
+        );
+
         match run_openclaw_stream(window, cancel, resolved, &["gateway", "restart"]) {
             Ok(()) => emit_log(window, "openclaw-log", "[update] 网关已自动重启。"),
             Err(err) => {
@@ -1755,10 +1746,28 @@ fn maybe_run_post_update_tasks(
                 );
             }
         }
-    }
 
+        emit_log(window, "openclaw-log", "[update] 自动更新流程完成。");
+        return Ok(());
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn emit_windows_post_update_restart_notice(window: &Window, gateway_was_running: bool) {
+    if gateway_was_running {
+        emit_log(
+            window,
+            "openclaw-log",
+            "[update] 更新前检测到网关正在运行。为避免弹出终端，已跳过自动重启；请稍后手动重启网关以应用新版本。",
+        );
+    } else {
+        emit_log(
+            window,
+            "openclaw-log",
+            "[update] 更新前网关未运行。为避免弹出终端，助手不会自动启动网关；如需使用新版本，请稍后手动启动或重启网关。",
+        );
+    }
     emit_log(window, "openclaw-log", "[update] 自动更新流程完成。");
-    Ok(())
 }
 
 #[tauri::command]
@@ -1781,36 +1790,82 @@ pub async fn update_openclaw(
         let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
         let gateway_was_running = collect_gateway_status_sync(&resolved).state == "running";
 
-        let update_args = [
+        #[cfg(target_os = "windows")]
+        if gateway_was_running {
+            emit_log(
+                &w2,
+                "openclaw-log",
+                "[update] 检测到更新前网关正在运行；为避免 Windows 文件占用，先临时停止网关，更新完成后请手动启动或重启。",
+            );
+            match windows_gateway_stop_direct_best_effort(&w2, &resolved) {
+                Ok(true) => emit_log(&w2, "openclaw-log", "[update] 已停止正在运行的网关，继续执行更新。"),
+                Ok(false) => emit_log(
+                    &w2,
+                    "openclaw-log",
+                    "[warn] 未确认到可停止的网关进程；若稍后仍报文件占用，请先手动停止网关后重试。",
+                ),
+                Err(err) => {
+                    if err == "用户取消" {
+                        return Err(err);
+                    }
+                    emit_log(
+                        &w2,
+                        "openclaw-log",
+                        format!(
+                            "[warn] 自动停止网关失败：{err}；若稍后仍报文件占用，请先手动停止网关后重试。"
+                        ),
+                    );
+                }
+            }
+        }
+
+        let mut update_args = vec![
             "update",
             "--channel",
             channel.as_str(),
             "--yes",
             "--non-interactive",
         ];
-        let (code, output) =
+        #[cfg(target_os = "windows")]
+        {
+            update_args.push("--no-restart");
+        }
+        let (mut code, mut output) =
             run_openclaw_update_stream_capture(&w2, &cancel2, &resolved, &update_args)?;
         if code != 0 {
             if output_looks_like_unknown_non_interactive_option(&output) {
                 emit_log(
                     &w2,
                     "openclaw-log",
-                    "[warn] 检测到更新后的兼容检查不支持 --non-interactive；更新主流程可能已完成，正在补跑兼容修复…",
+                    "[warn] 检测到当前 OpenClaw 不支持 --non-interactive，正在自动使用兼容参数重试更新…",
                 );
-                run_openclaw_with_compat_to_event(
-                    &w2,
-                    "openclaw-log",
-                    &cancel2,
-                    &resolved,
-                    &["doctor", "--fix", "--yes"],
-                )?;
-                emit_log(&w2, "openclaw-log", "已通过兼容模式完成更新后的修复。");
-                return Ok(());
+                let retry_args = remove_non_interactive_args(&update_args);
+                let (retry_code, retry_output) =
+                    run_openclaw_update_stream_capture(&w2, &cancel2, &resolved, &retry_args)?;
+                code = retry_code;
+                output = retry_output;
+                if code == 0 {
+                    emit_log(
+                        &w2,
+                        "openclaw-log",
+                        "[update] 已使用兼容参数完成更新命令，继续检查是否需要额外升级步骤…",
+                    );
+                }
             }
-            return Err(format!("openclaw 退出码：{code}"));
+            if code != 0 {
+                if output_looks_like_windows_file_busy(&output) {
+                    return Err(
+                        "更新失败：检测到 Windows 文件占用（EBUSY）。请先关闭正在运行的 OpenClaw/网关，再重试更新。"
+                            .into(),
+                    );
+                }
+                return Err(format!("openclaw 退出码：{code}"));
+            }
         }
 
         if !update_output_needs_package_manager_fallback(&output) {
+            #[cfg(target_os = "windows")]
+            emit_windows_post_update_restart_notice(&w2, gateway_was_running);
             return Ok(());
         }
 
@@ -1935,6 +1990,8 @@ pub async fn run_weixin_config(
         let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
         let plugin_spec = "@tencent-weixin/openclaw-weixin";
         let plugin_id = "openclaw-weixin";
+        let plugin_dir = resolve_installed_plugin_dir(plugin_id);
+        let plugin_dir_exists = plugin_dir.is_dir();
 
         emit_log(&w2, "install-log", "[weixin] 开始配置微信接入...");
         let removed_before = cleanup_stale_plugin_stage_dirs(&w2, plugin_id)?;
@@ -1942,39 +1999,59 @@ pub async fn run_weixin_config(
             emit_log(&w2, "install-log", "[weixin] 未发现残留安装临时目录。");
         }
 
-        emit_log(
-            &w2,
-            "install-log",
-            format!(">> openclaw plugins install \"{plugin_spec}\""),
-        );
-        let (install_code, install_output) = run_openclaw_stream_capture(
-            &w2,
-            &cancel2,
-            &resolved,
-            &["plugins", "install", plugin_spec],
-        )?;
-        if install_code != 0 {
-            let install_lower = install_output.to_ascii_lowercase();
-            if install_lower.contains("already exists")
-                || install_lower.contains("already installed")
-                || install_lower.contains("install record already exists")
-            {
-                emit_log(
-                    &w2,
-                    "install-log",
-                    "[weixin] 检测到插件已存在，改为更新插件...",
-                );
-                let (update_code, _update_output) = run_openclaw_stream_capture(
-                    &w2,
-                    &cancel2,
-                    &resolved,
-                    &["plugins", "update", plugin_id],
-                )?;
-                if update_code != 0 {
-                    return Err(format!("微信插件更新失败（退出码 {update_code}）"));
+        if plugin_dir_exists {
+            emit_log(
+                &w2,
+                "install-log",
+                format!(
+                    "[weixin] 检测到本地已存在插件目录，跳过远程安装并直接修复：{}",
+                    plugin_dir.to_string_lossy()
+                ),
+            );
+        } else {
+            emit_log(
+                &w2,
+                "install-log",
+                format!(">> openclaw plugins install \"{plugin_spec}\""),
+            );
+            let (install_code, install_output) = run_openclaw_stream_capture(
+                &w2,
+                &cancel2,
+                &resolved,
+                &["plugins", "install", plugin_spec],
+            )?;
+            if install_code != 0 {
+                let install_lower = install_output.to_ascii_lowercase();
+                if install_lower.contains("already exists")
+                    || install_lower.contains("already installed")
+                    || install_lower.contains("install record already exists")
+                {
+                    emit_log(
+                        &w2,
+                        "install-log",
+                        "[weixin] 检测到插件已存在，改为更新插件...",
+                    );
+                    let (update_code, _update_output) = run_openclaw_stream_capture(
+                        &w2,
+                        &cancel2,
+                        &resolved,
+                        &["plugins", "update", plugin_id],
+                    )?;
+                    if update_code != 0 {
+                        return Err(format!("微信插件更新失败（退出码 {update_code}）"));
+                    }
+                } else if resolve_installed_plugin_dir(plugin_id).is_dir()
+                    && (output_mentions_missing_plugin_sdk(&install_output)
+                        || install_lower.contains("rate limit exceeded"))
+                {
+                    emit_log(
+                        &w2,
+                        "install-log",
+                        "[weixin] 远程安装未完成，但检测到本地插件目录仍可修复，继续使用本地插件...",
+                    );
+                } else {
+                    return Err(format!("微信插件安装失败（退出码 {install_code}）"));
                 }
-            } else {
-                return Err(format!("微信插件安装失败（退出码 {install_code}）"));
             }
         }
 
@@ -2015,10 +2092,7 @@ pub async fn run_weixin_config(
         let (channels_code, channels_output) =
             run_openclaw_stream_capture(&w2, &cancel2, &resolved, &["channels", "list"])?;
         if channels_code != 0 {
-            let channels_lower = channels_output.to_ascii_lowercase();
-            if channels_lower.contains("cannot find module 'openclaw/plugin-sdk'")
-                || channels_lower.contains("cannot find module \"openclaw/plugin-sdk\"")
-            {
+            if output_mentions_missing_plugin_sdk(&channels_output) {
                 return Err(
                     "微信插件已安装，但当前 OpenClaw 运行时无法从插件目录解析 openclaw/plugin-sdk；helper 已尝试补齐兼容层，请查看上方日志并重试。"
                         .into(),
@@ -2067,9 +2141,7 @@ pub async fn run_weixin_config(
 pub async fn open_dashboard(_app: AppHandle) -> Result<String, String> {
     let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
 
-    let mut cmd = Command::new(&resolved.command);
-    apply_windows_no_window(&mut cmd);
-    cmd.env("PATH", &resolved.path_env);
+    let mut cmd = create_openclaw_command(&resolved);
     cmd.args(["dashboard", "--no-open"]);
     let output = cmd.output().map_err(|e| e.to_string())?;
     let combined = format!(
@@ -2854,9 +2926,7 @@ fn run_openclaw_config_get_json(
     resolved: &crate::openclaw::ResolvedOpenclaw,
     path: &str,
 ) -> Result<serde_json::Value, String> {
-    let mut cmd = Command::new(&resolved.command);
-    apply_windows_no_window(&mut cmd);
-    cmd.env("PATH", &resolved.path_env);
+    let mut cmd = create_openclaw_command(resolved);
     cmd.args(["config", "get", path, "--json"]);
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
@@ -2876,9 +2946,7 @@ fn run_openclaw_config_get_json_cancelable(
     path: &str,
 ) -> Result<serde_json::Value, String> {
     check_canceled(cancel)?;
-    let mut cmd = Command::new(&resolved.command);
-    apply_windows_no_window(&mut cmd);
-    cmd.env("PATH", &resolved.path_env);
+    let mut cmd = create_openclaw_command(resolved);
     cmd.args(["config", "get", path, "--json"]);
     let out = capture_command_output_cancelable(cmd, cancel.clone())?;
     if out.code != 0 {
@@ -2901,9 +2969,7 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value, String> {
 fn resolve_openclaw_config_file_path(
     resolved: &crate::openclaw::ResolvedOpenclaw,
 ) -> Result<PathBuf, String> {
-    let mut cmd = Command::new(&resolved.command);
-    apply_windows_no_window(&mut cmd);
-    cmd.env("PATH", &resolved.path_env);
+    let mut cmd = create_openclaw_command(resolved);
     cmd.args(["config", "file"]);
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
@@ -2977,9 +3043,7 @@ fn run_openclaw_config_set(
         format!("[config] set {path} = {value}"),
     );
 
-    let mut cmd = Command::new(&resolved.command);
-    apply_windows_no_window(&mut cmd);
-    cmd.env("PATH", &resolved.path_env);
+    let mut cmd = create_openclaw_command(resolved);
     cmd.arg("config").arg("set");
     if strict_json {
         cmd.arg("--strict-json");
@@ -3001,9 +3065,7 @@ fn run_openclaw_collect(
     resolved: &crate::openclaw::ResolvedOpenclaw,
     args: &[&str],
 ) -> Result<String, String> {
-    let mut cmd = Command::new(&resolved.command);
-    apply_windows_no_window(&mut cmd);
-    cmd.env("PATH", &resolved.path_env);
+    let mut cmd = create_openclaw_command(resolved);
     cmd.args(args);
     let out = cmd.output().map_err(|e| e.to_string())?;
     Ok(format!(
@@ -3194,9 +3256,7 @@ fn log_environment(window: &Window, cancel: &Arc<AtomicBool>, path_env: &str) {
                 "install-log",
                 format!("openclaw resolved: (found) ({})", resolved.source),
             );
-            let mut cmd = Command::new(&resolved.command);
-            apply_windows_no_window(&mut cmd);
-            cmd.env("PATH", &resolved.path_env);
+            let mut cmd = create_openclaw_command(&resolved);
             cmd.arg("--version");
             let out = cmd.output().ok().map(|o| {
                 let s = format!(
@@ -3561,9 +3621,7 @@ fn start_install_blocking(
         }
 
         let resolved = resolve_openclaw().ok_or("未检测到 openclaw，请先完成安装。")?;
-        let mut cmd = Command::new(&resolved.command);
-        apply_windows_no_window(&mut cmd);
-        cmd.env("PATH", &resolved.path_env);
+        let mut cmd = create_openclaw_command(&resolved);
         cmd.args(["onboard", "--non-interactive", "--accept-risk"]);
         #[cfg(target_os = "windows")]
         {
