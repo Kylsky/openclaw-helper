@@ -35,10 +35,18 @@ window.installer = {
     const { invoke } = assertTauri();
     return await invoke("cancel_task", {});
   },
+  getTaskStatus: async () => {
+    const { invoke } = assertTauri();
+    return await invoke("get_task_status", {});
+  },
   runOpenclaw: async (args) => {
     const { invoke } = assertTauri();
     const finalArgs = Array.isArray(args) ? args.map((x) => String(x)) : [];
     return await invoke("run_openclaw", { args: finalArgs });
+  },
+  updateOpenclaw: async (channel) => {
+    const { invoke } = assertTauri();
+    return await invoke("update_openclaw", { channel: String(channel || "stable") });
   },
   execOpenclawCollect: async (args) => {
     const { invoke } = assertTauri();
@@ -73,6 +81,10 @@ window.installer = {
   uninstallOpenclaw: async () => {
     const { invoke } = assertTauri();
     return await invoke("uninstall_openclaw", {});
+  },
+  runWeixinConfig: async () => {
+    const { invoke } = assertTauri();
+    return await invoke("run_weixin_config", {});
   },
   openExternal: async (url) => {
     const { invoke } = assertTauri();

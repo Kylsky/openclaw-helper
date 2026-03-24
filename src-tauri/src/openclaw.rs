@@ -5,10 +5,19 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+pub struct CapturedCommandOutput {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
 
 pub fn apply_windows_no_window(cmd: &mut Command) {
     #[cfg(target_os = "windows")]
@@ -37,11 +46,85 @@ fn kill_process_tree_best_effort(pid: u32) {
         .status();
 }
 
+#[cfg(unix)]
+fn configure_cancelable_process_group(cmd: &mut Command) {
+    cmd.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_cancelable_process_group(cmd: &mut Command) {
+    let _ = cmd;
+}
+
+#[cfg(unix)]
+fn kill_process_tree_best_effort_unix(pid: u32) {
+    let group = format!("-{pid}");
+    for signal in ["-TERM", "-KILL"] {
+        let mut cmd = Command::new("kill");
+        let _ = cmd
+            .args([signal, &group])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if signal == "-TERM" {
+            std::thread::sleep(std::time::Duration::from_millis(180));
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedOpenclaw {
     pub command: PathBuf,
     pub source: &'static str,
     pub path_env: String,
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_openclaw_node_launch(
+    resolved: &ResolvedOpenclaw,
+) -> Option<(PathBuf, PathBuf)> {
+    let extension = resolved
+        .command
+        .extension()
+        .and_then(|value| value.to_str())?
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "cmd" | "bat") {
+        return None;
+    }
+
+    let bin_dir = resolved.command.parent()?;
+    let script = [
+        bin_dir.join("node_modules").join("openclaw").join("openclaw.mjs"),
+        bin_dir.join("node_modules").join("OpenClaw").join("openclaw.mjs"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())?;
+
+    let node = resolve_command_in_path("node", &resolved.path_env)
+        .or_else(|| {
+            let candidate = bin_dir.join("node.exe");
+            candidate.is_file().then_some(candidate)
+        })?;
+
+    Some((node, script))
+}
+
+pub fn create_openclaw_command(resolved: &ResolvedOpenclaw) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some((node, script)) = resolve_windows_openclaw_node_launch(resolved) {
+            let mut cmd = Command::new(node);
+            apply_windows_no_window(&mut cmd);
+            cmd.env("PATH", &resolved.path_env);
+            cmd.arg(script);
+            return cmd;
+        }
+    }
+
+    let mut cmd = Command::new(&resolved.command);
+    apply_windows_no_window(&mut cmd);
+    cmd.env("PATH", &resolved.path_env);
+    cmd
 }
 
 pub fn home_dir() -> Option<PathBuf> {
@@ -482,13 +565,14 @@ pub fn get_openclaw_info(with_help: bool) -> OpenclawInfo {
         .as_ref()
         .map(|r| r.path_env.clone())
         .unwrap_or_else(create_base_path_env);
-    let command = resolved
+    let mut version_cmd = resolved
         .as_ref()
-        .map(|r| r.command.clone())
-        .unwrap_or_else(|| PathBuf::from("openclaw"));
-
-    let mut version_cmd = Command::new(&command);
-    version_cmd.env("PATH", &path_env);
+        .map(create_openclaw_command)
+        .unwrap_or_else(|| {
+            let mut cmd = Command::new("openclaw");
+            cmd.env("PATH", &path_env);
+            cmd
+        });
     version_cmd.arg("--version");
 
     match run_collect(version_cmd) {
@@ -496,8 +580,14 @@ pub fn get_openclaw_info(with_help: bool) -> OpenclawInfo {
             let combined = format!("{stdout}\n{stderr}");
             let version = parse_version_from_output(&combined).or(Some("unknown".into()));
             let help = if with_help {
-                let mut help_cmd = Command::new(&command);
-                help_cmd.env("PATH", &path_env);
+                let mut help_cmd = resolved
+                    .as_ref()
+                    .map(create_openclaw_command)
+                    .unwrap_or_else(|| {
+                        let mut cmd = Command::new("openclaw");
+                        cmd.env("PATH", &path_env);
+                        cmd
+                    });
                 help_cmd.arg("--help");
                 run_collect(help_cmd).ok().map(|(_, out, err)| {
                     let combined = format!("{out}\n{err}");
@@ -796,6 +886,7 @@ pub fn spawn_with_streaming_logs_cancelable(
 ) -> Result<i32, String> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     apply_windows_no_window(&mut cmd);
+    configure_cancelable_process_group(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let stdout = child.stdout.take().ok_or("stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("stderr unavailable")?;
@@ -878,6 +969,7 @@ pub fn spawn_with_streaming_logs_cancelable(
             }
             #[cfg(not(target_os = "windows"))]
             {
+                kill_process_tree_best_effort_unix(child.id());
                 let _ = child.kill();
             }
             let _ = child.wait();
@@ -893,6 +985,63 @@ pub fn spawn_with_streaming_logs_cancelable(
                 let _ = err_thread.join();
                 let _ = forward_thread.join();
                 return Ok(status.code().unwrap_or(-1));
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(120)),
+        }
+    }
+}
+
+pub fn capture_command_output_cancelable(
+    mut cmd: Command,
+    cancel: Arc<AtomicBool>,
+) -> Result<CapturedCommandOutput, String> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    apply_windows_no_window(&mut cmd);
+    configure_cancelable_process_group(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let stdout = child.stdout.take().ok_or("stdout unavailable")?;
+    let stderr = child.stderr.take().ok_or("stderr unavailable")?;
+
+    let out_thread = std::thread::spawn(move || {
+        let mut reader = stdout;
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+
+    let err_thread = std::thread::spawn(move || {
+        let mut reader = stderr;
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+
+    loop {
+        if cancel.load(AtomicOrdering::SeqCst) {
+            #[cfg(target_os = "windows")]
+            {
+                kill_process_tree_best_effort(child.id());
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                kill_process_tree_best_effort_unix(child.id());
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+            let _ = out_thread.join();
+            let _ = err_thread.join();
+            return Err("用户取消".into());
+        }
+
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(status) => {
+                let stdout = out_thread.join().unwrap_or_default();
+                let stderr = err_thread.join().unwrap_or_default();
+                return Ok(CapturedCommandOutput {
+                    code: status.code().unwrap_or(-1),
+                    stdout: String::from_utf8_lossy(&stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&stderr).to_string(),
+                });
             }
             None => std::thread::sleep(std::time::Duration::from_millis(120)),
         }

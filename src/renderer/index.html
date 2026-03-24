@@ -125,6 +125,19 @@
             清理服务和命令行工具，不可逆转。
           </div>
         </div>
+
+        <div class="featureCard">
+          <div class="featureHeader">
+            <div class="featureTitle">微信接入</div>
+            <div class="featureActions">
+              <button id="weixinConfigBtn" style="padding: 6px 12px; font-size: 12px" type="button">
+                配置微信
+              </button>
+            </div>
+          </div>
+          <div class="featureDesc" style="margin-bottom: auto">
+            将 OpenClaw 接入微信，日志将回显二维码用于扫描登录。 </div>
+        </div>
       </div>
     </section>
 
@@ -283,22 +296,26 @@
               </div>
               <div id="cfgGatewayTrustedProxiesField" class="field fieldSpan2 hidden">
                 <div class="label">可信代理 IP / CIDR</div>
-                <textarea id="cfgGatewayTrustedProxies" rows="3" placeholder="每行一个，例如：&#10;127.0.0.1&#10;10.0.0.1/32"></textarea>
+                <textarea id="cfgGatewayTrustedProxies" rows="3"
+                  placeholder="每行一个，例如：&#10;127.0.0.1&#10;10.0.0.1/32"></textarea>
                 <div class="hint">对应 `gateway.trustedProxies`。支持换行或逗号分隔；仅填写你信任的反向代理地址。</div>
               </div>
               <div id="cfgGatewayTrustedProxyUserHeaderField" class="field hidden">
                 <div class="label">用户身份 Header</div>
-                <input id="cfgGatewayTrustedProxyUserHeader" type="text" list="cfgGatewayTrustedProxyUserHeaderPresets" placeholder="例如: x-forwarded-user" />
+                <input id="cfgGatewayTrustedProxyUserHeader" type="text" list="cfgGatewayTrustedProxyUserHeaderPresets"
+                  placeholder="例如: x-forwarded-user" />
                 <div class="hint">对应 `gateway.auth.trustedProxy.userHeader`，用于传递已认证用户身份。</div>
               </div>
               <div id="cfgGatewayTrustedProxyRequiredHeadersField" class="field hidden">
                 <div class="label">必需 Header</div>
-                <textarea id="cfgGatewayTrustedProxyRequiredHeaders" rows="3" placeholder="每行一个，例如：&#10;x-forwarded-proto&#10;x-forwarded-host"></textarea>
+                <textarea id="cfgGatewayTrustedProxyRequiredHeaders" rows="3"
+                  placeholder="每行一个，例如：&#10;x-forwarded-proto&#10;x-forwarded-host"></textarea>
                 <div class="hint">对应 `gateway.auth.trustedProxy.requiredHeaders`。这些 Header 缺失时请求不会被信任。</div>
               </div>
               <div id="cfgGatewayTrustedProxyAllowUsersField" class="field fieldSpan2 hidden">
                 <div class="label">允许用户列表</div>
-                <textarea id="cfgGatewayTrustedProxyAllowUsers" rows="3" placeholder="每行一个，例如：&#10;admin@example.com&#10;ops@example.com"></textarea>
+                <textarea id="cfgGatewayTrustedProxyAllowUsers" rows="3"
+                  placeholder="每行一个，例如：&#10;admin@example.com&#10;ops@example.com"></textarea>
                 <div class="hint">对应 `gateway.auth.trustedProxy.allowUsers`。留空表示允许所有已认证用户。</div>
               </div>
             </div>

@@ -56,6 +56,11 @@ body {
   min-height: 100vh;
   display: flex;
   justify-content: center;
+  overflow-x: hidden;
+}
+
+body.modalOpen {
+  overflow: hidden;
 }
 
 .app {
@@ -406,6 +411,13 @@ button:disabled {
   gap: 16px;
   padding: 20px 24px 24px;
   overflow: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.operationModalContent::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .operationSection {
@@ -420,7 +432,7 @@ button:disabled {
 }
 
 .operationModal .log {
-  height: min(42vh, 360px);
+  height: min(36vh, 320px);
   background: rgba(0, 0, 0, 0.12);
 }
 
@@ -492,14 +504,25 @@ button:disabled {
   padding: 16px;
   height: 240px;
   overflow: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 13px;
+  line-height: 1.2;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
+.log::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
 .logLine {
-  padding: 2px 0;
+  padding: 0;
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  line-height: 1.15;
 }
 
 .logStep {
